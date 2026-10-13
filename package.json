@@ -1,0 +1,22 @@
+{
+  "name": "koishi-plugin-chatluna-envsense",
+  "description": "为Bot注册多种辅助信息工具，自主决定是否获取群聊信息与用户个人信息等",
+  "version": "0.0.1",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "dist"
+  ],
+  "license": "MIT",
+  "scripts": {},
+  "keywords": [
+    "chatbot",
+    "koishi",
+    "plugin"
+  ],
+  "devDependencies": {},
+  "peerDependencies": {
+    "koishi": "^4.18.7"
+  }
+}
