@@ -1,22 +1,50 @@
 {
   "name": "koishi-plugin-chatluna-envsense",
-  "description": "为Bot注册多种辅助信息工具，自主决定是否获取群聊信息与用户个人信息等",
-  "version": "0.0.1",
+  "description": "ChatLuna 环境感知工具集：为 Agent（plugin）模式按需注册群聊与用户信息查询工具（纯只读，仅 NapCat/onebot 生效）",
+  "version": "1.0.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
     "lib",
     "dist"
   ],
+  "homepage": "https://github.com/Star-Hikari/chatluna-envsense#readme",
+  "issues": "https://github.com/Star-Hikari/chatluna-envsense/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/StarHikari/chatluna-envsense.git"
+  },
   "license": "MIT",
-  "scripts": {},
   "keywords": [
     "chatbot",
     "koishi",
-    "plugin"
+    "chatluna",
+    "plugin",
+    "napcat",
+    "onebot"
   ],
-  "devDependencies": {},
   "peerDependencies": {
-    "koishi": "^4.18.7"
+    "@langchain/core": "^0.3.0",
+    "koishi": "^4.18.7",
+    "koishi-plugin-chatluna": "^1.4.0",
+    "zod": "^3.25.0"
+  },
+  "koishi": {
+    "description": {
+      "zh": "ChatLuna 环境感知工具集：为 Agent（plugin）模式按需提供群概况、成员、公告、荣誉、精华、打卡、头像与 QQ 资料卡、获赞等只读查询；图片取回真实字节再交给模型。仅 NapCat(onebot11) 生效。",
+      "en": "Read-only environment awareness tools for ChatLuna agent mode: group info, members, notices, honors, essence, sign-in, avatars and QQ profile stats, on demand. Images are fetched as real bytes instead of bare links. NapCat(onebot11) only."
+    },
+    "service": {
+      "required": [
+        "chatluna"
+      ],
+      "optional": [
+        "notifier",
+        "chatluna_storage"
+      ]
+    }
+  },
+  "optionalDependencies": {
+    "@koishijs/plugin-notifier": "^1.2.1"
   }
 }

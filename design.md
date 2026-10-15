@@ -1,5 +1,12 @@
 # chatluna-envsense 设计文档 v0.1
 
+> **后续修订（本文档为开发前拍板稿，只记录当时的决策，不再随实现回改）**：
+> - 用户感知中的互动写操作工具 `profile_like`、对应配置 `user.like.*` 与 napi 的 `sendLike`
+>   声明已整体下线，插件现为纯只读形态；
+> - 原 `profile_like_status` 已更名为 `profile_reaction_stats`（配置键 `user.reactionStats`），
+>   输出措辞改为中性的"资料卡互动数据"。
+> 下文 §4.3 / §5.5 / §8 保留原始设计记录，仅作对照，不代表当前实现。
+
 > 目标：为 ChatLuna 的 Agent 模式（plugin chatMode）注册一组**环境感知工具**，让 bot 能按需查询
 > "我在群里知道什么"与"关于某个 QQ 用户我能知道什么"。纯按需工具形态（不做 prompt 注入），
 > 零侵入、零常态 token 成本。
@@ -7,7 +14,7 @@
 > 依据（三份一手调研，均在 `.memory/`）：
 > - `chatluna-plugin-mode-and-tools.md` —— plugin 模式运行机制与工具注册规范
 > - `napcat-group-info-survey.md` —— 群聊侧可用接口与字段
-> - `napcat-user-info-survey.md` —— 用户资料/头像/点赞可用接口与字段
+> - `napcat-user-info-survey.md` —— 用户资料/头像可用接口与字段
 >
 > 本文档为开发前拍板稿：工具范围、参数、返回、配置、风险面。本期覆盖**群聊感知**与**用户感知**两大类；
 > QQ 空间动态类能力本期不涉及。
@@ -40,7 +47,7 @@ external/chatluna-envsense/
 | 仅 NapCat(onebot11) 有全部接口；官方 adapter-qq 没有 | 工具 `authorization: (session) => session.platform === 'onebot'`（非 onebot 会话工具直接不进激活集）+ `_call` 内二重 fail-soft 返回提示文本 |
 | 装了 chatluna-agent 时工具可见性受权限 mask 约束 | 所有工具 `meta.defaultAvailability = { enabled:true, main:true, subAgent:true, chatluna:true, characterScope:'all' }` |
 | `get_profile_like`/个别 action adapter 未包装 | napi.ts 内 `(bot as any).internal._get(action, params)` 直发；`retcode!=0` 抛 SenderError → catch 成 observation 文本 |
-| WebApi 类接口（公告/荣誉/点赞查询）偶发失败 | 错误文案区分"接口失败（稍后可重试一次）"与"无数据"；工具描述不承诺实时性 |
+| WebApi 类接口（公告/荣誉/精华/资料卡互动数据）偶发失败 | 错误文案区分"接口失败（稍后可重试一次）"与"无数据"；工具描述不承诺实时性 |
 
 ## 3. 工具清单 —— 群域（group.*）
 
@@ -121,46 +128,40 @@ external/chatluna-envsense/
 - 定位：图片**给模型看**（评价头像、找茬、玩梗），不是发送到聊天窗口；若用户想让 bot"发头像图到群里"，那是模型拿到图片描述后的正常回复行为，不在本工具职责
 - ⚠️ 备注：**要求主模型支持图片输入（capabilities 含 `image_input`）**；不支持时的降级行为见 §5.7
 
-### 4.3 `profile_like` —— 给对方资料卡点赞（**默认开，写操作**）
-- 数据源：`sendLike(qq, times)`（NT 通道）
-- 参数：`user_id?`（同上缺省）、`times?`（1-6，默认 1）
-- 返回：成功"已给 {nick} 点赞 x{n}（对方资料卡赞数+…以 QQ 为准）"；错误码 1400 → "点赞过于频繁或对方无法被赞，今天别再试了"
-- 风控：工具描述写明"每人每日点赞次数有限，失败**勿重试**"；agent 循环本身有同参去重二重防护
-- 配置：`user.like.enabled` 总开关（关则不注册）+ `user.like.allowUsers` 可选白名单（空=不限）
-  ——authorization 里校验（fail-open/closed 由白名单是否为空决定，语义与 livingdiary 一致）
-
-### 4.4 `profile_like_status` —— 查询资料卡点赞数（默认开）
+### 4.3 `profile_reaction_stats`（原设计名 `profile_like_status`）—— 查询资料卡互动数据（默认开）
 - 数据源：`internal._get('get_profile_like', { user_id?, start:0, count:10 })`（adapter 未包装；传他人查他人 type=1，不传查自己 type=2）
-- 参数：`user_id?`（缺省=bot 自己）、`top?`（点赞人列表条数，默认 5）
-- 返回：`总赞数 / 今日新增 / 最近点赞人列表(昵称+时间)`
-- 场景："我今天的赞多吗"“看看 ta 受欢迎程度”；与 4.3 的文案区分"赞数查询"vs"点赞动作"
+- 参数：`user_id?`（缺省=bot 自己）、`top?`（最近互动人列表条数，默认 5）
+- 返回：`总计 / 今日新增 / 最近互动的人列表(昵称+时间)`
+- 场景："我的资料卡有多少人互动过"“看看 ta 受欢迎程度”
 - WebApi 失败率高：错误文案 §2
 
 本期不做：好友关系/备注查询独立工具（user_profile 已带 remark；friend 列表成本高）、私聊历史统计、在线设备列表（packet 依赖待真机验证）。
 
 ## 5. 通用实现规范
 
-1. **注册**：`ChatLunaPlugin.registerTool(name, {...})`（自带 ctx.effect 清理）；`selector: () => true`；
-   `authorization: 平台门 + 写工具白名单`。工具实例用 `tool(fn, {name, description, schema: z.object(...)})` 函数式。
+1. **注册**：`ctx.chatluna.platform.registerTool(name, def)` 返回 disposer；apply 里统一收集、由顶层
+   `ctx.effect(() => () => 逐一 dispose())` 在 scope 销毁（停服/HMR）时注销
+   （未用 `ChatLunaPlugin` 基类——本插件无平台客户端，不需要基类的 config pool/proxy 配置面，与 chatluna-guard 先例一致）。
+   `selector: () => true`；`authorization: 平台门 + 写工具白名单`。工具实例用 `tool(fn, {name, description, schema: z.object(...)})` 函数式。
 2. **运行期上下文**：一律从 `_call(input, _, runConfig)` 的 `runConfig.configurable.session` 取
    （群号/对端 QQ/selfId/bot 实例都从 session 出发；无 session 场景 = 子代理 invoke 带 routing 时 session 仍存在（buildVirtualSession），拿不到时返回提示文本）。
 3. **napi.ts 访问层**：统一签名 `fetchGroupInfo(internal, groupId, ttlCache, logger)`；
    每条 API：超时（默认 10s，AbortSignal 透传 chain 的 signal 不易——用 Promise.race）→ 归一化错误 `{ ok:false, error:string }`；
    TTL Map（key=`action:group`）；`retcode!=0`(SenderError) catch 成中文短语。
 4. **格式化**：所有时间→`YYYY-MM-DD HH:mm` + 相对时间括注；昵称优先 `card || nickname`；文本行式输出避免 JSON 噪音（模型读行式更稳）。
-5. **配置 Schema**（中文描述，guard 同款顶层 intersect+union 总开关联动）：
+5. **配置 Schema**（中文描述，顶层 intersect 分卡片；原总开关已删，与控制台实例开关重复）：
    ```
-   基础设置: enabled(总开关)
    通用: cacheTtlSeconds(默认300) · groupIdHint? 无
    群聊感知: group.overview / members(成员数上限) / memberDetail / notices / honors / essence / signed / avatar / activity(默认false)
-   用户感知: profile / avatar / like{enabled默认true, maxTimes默认6, allowUsers[]} / likeStatus
+   用户感知: profile / avatar / reactionStats
    ```
 6. **locale**：暂只内置中文文案（工具 description/observation），不接 i18n 资源（本项目场景固定中文；发布市场前再补 en-US）。
 7. **多模态 observation（3.9 / 4.2 两个头像工具专用）**：
    - 返回 langchain content-part 数组 `[{type:'image_url',image_url:{url}}, {type:'text',text:…}]`——
      chatluna agent 循环的 `coerceToAgentObservation` 对全 complex content 数组**原样透传为多模态观察**（调研：agent/index.mjs:316），模型即可"看见"图片，无需任何适配。
-   - 能力判定：`_call` 里用本次 `runConfig.configurable.model`（ChatLunaChatModel）反解 `platform/model`，
-     查 `platform.findModel(...).value.capabilities.includes(ModelCapabilities.ImageInput)`；判定链路失败时**乐观放行**（直接传图）。
+   - 能力判定：`_call` 里直接读 `runConfig.configurable.model`（ChatLunaChatModel）的
+     `.modelInfo.capabilities.includes(ModelCapabilities.ImageInput)`（模型实例自带 ModelInfo，无需 findModel 反查）；
+     判定链路失败时**乐观放行**（直接传图）。
    - 不支持图片输入的模型：返回文本 observation
      `当前模型不支持图片输入，无法查看头像（直链 {url}）；请告知用户换用支持视觉的模型。`
    - 子代理（task 工具派生）调起时以子代理实际使用的 model 判定，两者可能不同，属预期。
@@ -169,7 +170,7 @@ external/chatluna-envsense/
 
 - 工具注册/变更触发 `chatluna/tool-updated` → plugin/browsing 会话缓存自动清理，热重载安全；
 - 不写 dependencies 只写 peer（防双副本枚举失效，dev-guide §1）；
-- 子代理（chatluna-agent task）默认可见（main+subAgent 均 true）；若要求"点赞仅主代理"，改 subAgent:false 即可（本期两者都开）；
+- 子代理（chatluna-agent task）默认可见（main+subAgent 均 true）；若要求"某写操作工具仅主代理"，改 subAgent:false 即可；
 - 观测调用：调试期可给 `invoke` 传 `ChatEvents['llm-call-tool']` 或看 debug 日志 `Tool end:`；
 - react 降级模式（模型无 tool_call 能力时 plugin 模式走 ReAct 文本协议）同样吃这套注册，无需适配。
 
@@ -178,7 +179,7 @@ external/chatluna-envsense/
 1. **离线引导**：CJS 脚本 `new Context({data:{}})` + 手动 plugin（chatluna + envsense）+ `app.start()`，
    断言：工具全部进 `platform.getToolRegistry()`；authorization 平台门；截断/过滤纯函数单测（keyword 过滤、时间格式化、空字段过滤）。
 2. **API 仿真**：伪造 `session.bot.internal`（返回样本 JSON，含公告 inst 条目/荣誉空榜/1400 错误）验证 observation 文案与错误分支。
-3. **真机矩阵**（NapCat，selfId 3657588917）：每个工具 ≥2 条引导话术（正常+边界：非群聊调用/大群截断/隐私空字段/点赞频控）；
+3. **真机矩阵**（NapCat，selfId 3657588917）：每个工具 ≥2 条引导话术（正常+边界：非群聊调用/大群截断/隐私空字段/接口频控）；
    验证 chatluna-agent 权限 mask 不挡 defaultAvailability；确认 adapter `_get('get_profile_like')` 在真机版本可用。
 4. **多模态专项**（3.9 / 4.2）：视觉模型（qwen3.8-flash sticker 同款）下"评价一下这个头像/群头像"应能描述图片内容；
    切纯文本模型验证降级文案；URL 可达性（qlogo/p.qlogo 直链在服务器网络环境可访问，不行则改 `ctx.http.get` 拉 bytes 转 data URI）。
@@ -186,6 +187,7 @@ external/chatluna-envsense/
 
 ## 8. 风险与免责
 
-- **封号/风控面**：本期写操作仅"资料卡点赞"（低风险高频控），其余全部为只读查询；头像工具只拉公开直链图片、不调任何写接口。
+- **封号/风控面**：当前版本**全部为只读查询**（原互动写操作已下线），头像工具只拉公开直链图片、
+  不调任何写接口，风控面最小。
 - **隐私**：资料卡只回"QQ 本来就公开"的字段；不返回 email/phone 键位；群成员数据仅在 bot 所在群可见（NapCat 侧硬约束）。
 - **协议依赖**：NapCat 版本行为差异（公告 inst、packet 类接口）——napi.ts 全量错误归一化保证不炸会话。
