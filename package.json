@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-chatluna-envsense",
   "description": "ChatLuna 环境感知工具集：为 Agent（plugin）模式按需注册群聊与用户信息查询工具（纯只读，仅 NapCat/onebot 生效）",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -23,11 +23,13 @@
     "napcat",
     "onebot"
   ],
+  "dependencies": {
+    "@langchain/core": "^0.3.80",
+    "zod": "3.25.76"
+  },
   "peerDependencies": {
-    "@langchain/core": "^0.3.0",
     "koishi": "^4.18.7",
-    "koishi-plugin-chatluna": "^1.4.0",
-    "zod": "^3.25.0"
+    "koishi-plugin-chatluna": "^1.4.0"
   },
   "koishi": {
     "description": {
