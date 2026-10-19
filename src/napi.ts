@@ -1,4 +1,4 @@
-import type { Logger, Session } from 'koishi'
+import type { Context, Logger, Session } from 'koishi'
 import type { SenseLogger } from './log'
 
 // ─────────────────────────────────────────────
@@ -22,8 +22,32 @@ export interface OneBotInternal {
   getGroupSignedList(group_id: string | number): Promise<NapSignedItem[]>
   getEssenceMsgList(group_id: string | number): Promise<NapEssenceItem[]>
   getStrangerInfo(user_id: string | number, no_cache?: boolean): Promise<NapStrangerInfo>
+  /**
+   * 合并转发记录内容（action: get_forward_msg）。
+   * adapter 用 defineExtract('get_forward_msg', 'messages', 'message_id') 包装，
+   * 所以这个方法**直接返回 messages 数组**（retcode!=0 时抛 SenderError）。
+   * 注意 prepareArg 会把 <2^32 的 *_id 参数转成 Number —— 转发 res_id 是 19 位，不会被转。
+   */
+  getForwardMsg(message_id: string | number): Promise<ForwardMessageRecord[]>
+  /** 单条消息原文（action: get_msg），用于从"装着转发的普通消息"里反查转发记录 ID */
+  getMsg(message_id: string | number): Promise<Record<string, any>>
   /** 底层通道：adapter 未包装的 action 由此直发（retcode!=0 抛 SenderError） */
   _get(action: string, params?: Record<string, unknown>): Promise<any>
+}
+
+/** get_forward_msg 返回的单条记录（只声明用到的字段） */
+export interface ForwardMessageRecord {
+  message_id?: string | number
+  real_id?: string | number
+  message_seq?: string | number
+  time?: number | string
+  sender?: { user_id?: string | number; nickname?: string; card?: string }
+  user_id?: string | number
+  nickname?: string
+  /** 段数组（多数实现），少数实现给 CQ 串 */
+  message?: unknown
+  raw_message?: string
+  data?: { message?: unknown }
 }
 
 // ── 主要返回结构（只声明用到的字段，NapCat 返回值常多于声明）──
@@ -281,4 +305,153 @@ export class TtlCache {
     }
     this.map.set(key, { expireAt: Date.now() + this.ttlSeconds * 1000, value })
   }
+
+  /**
+   * 主动丢弃一条缓存。
+   * 用途：某些接口抓取失败时会**静默返回空结果**（如 NapCat 的荣誉榜），把空结果留在缓存里
+   * 会让瞬时失败粘住整个 TTL。工具拿到空结果后调这个删掉，下次就会重新实查；
+   * 顺带也能把"修复之前已经被写进去的空缓存"自愈掉。
+   */
+  delete(key: string): void {
+    this.map.delete(key)
+  }
+}
+
+// ─────────────────────────────────────────────
+// 群荣誉榜「直连兜底」
+//
+// 背景（2026-10-19 实测）：腾讯把 qun.qq.com/interactive/honorlist 从服务端渲染页改成了 SPA，
+// 返回的 HTML 里**不再有 window.__INITIAL_STATE__**（实测 8.6KB 的 SPA 外壳，数据改由前端请求）。
+// 而 NapCat 的 get_group_honor_info 仍按老格式解析：
+//
+//   const match = /window\.__INITIAL_STATE__=(.*?);/.exec(res)
+//   return type === 1 ? resJson?.talkativeList : resJson?.actorList
+//
+// 正则永远匹配不上 → getHonorList 打「获取类型 N 的荣誉信息失败」后 return []（静默回全空），
+// 四个 type 于是全部失败。这是 NapCat 侧的回归。
+//
+// 兜底做法：用与页面同款的 cookie + bkn 直连新版 cgi 接口（接口从 SPA 的 honorlist-*.js 读出）：
+//   GET /cgi-bin/qunapp/honor_talkative?gc&num&bkn                               → data.current_talkative / data.talkative_list
+//   GET /cgi-bin/new_honor/list_honor/list_richer_honor?group_code&num&start&bkn → data.current_richer_honor / data.richer_honor_list
+//   GET /cgi-bin/qunapp/honor_emotion?gc&num&bkn                                 → data.emotion_list
+// 信封统一为 { retcode, msg, data }，retcode === 0 才算成功（无 cookie 时 retcode=100000 login error）。
+// bkn 直接用 NapCat get_cookies 给出的值——实测其算法与页面一致（DJB hash from skey）。
+//
+// ⚠️ 这是**临时兜底**，只在「NapCat 返回全空」时才跑（天生自失效）。等 NapCat 修好解析后整块可删。
+// ─────────────────────────────────────────────
+
+const HONOR_BASE = 'https://qun.qq.com'
+const HONOR_REFERER = 'https://qun.qq.com/interactive/honorlist'
+const HONOR_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+const HONOR_TIMEOUT_MS = 15_000
+
+/** 新版接口的名单项：uin/nick 是页面自己的字段名，与 NapCat 映射后的 user_id/nickname 不同 */
+interface HonorApiEntry {
+  uin?: string | number
+  nick?: string
+  day_count?: number
+  day_count_history?: number
+}
+
+function honorToEntry(raw: HonorApiEntry | undefined): NapHonorEntry | undefined {
+  if (!raw) return undefined
+  const uid = raw.uin != null ? String(raw.uin) : ''
+  if (!uid && !raw.nick) return undefined
+  const num = Number(uid)
+  const days = raw.day_count_history ?? raw.day_count
+  const entry: NapHonorEntry = {}
+  if (uid && Number.isFinite(num) && num > 0) entry.user_id = num
+  if (raw.nick) entry.nickname = raw.nick
+  if (typeof days === 'number' && days > 0) entry.day_count = days
+  return entry
+}
+
+function honorToEntryList(list: unknown): NapHonorEntry[] {
+  if (!Array.isArray(list)) return []
+  return list.map((item) => honorToEntry(item as HonorApiEntry)).filter((x): x is NapHonorEntry => !!x)
+}
+
+/**
+ * 直连新版接口取群荣誉数据。
+ * 返回 undefined 表示兜底不可用（拿不到 cookie/bkn，或所有请求都没成功）——调用侧继续按"没读到"处理。
+ */
+export async function fetchHonorsDirect(opts: {
+  ctx: Context
+  internal: { _get(action: string, params?: Record<string, unknown>): Promise<any> } | undefined
+  gid: string
+  logger?: SenseLogger
+}): Promise<NapHonorInfo | undefined> {
+  const { ctx, internal, gid, logger } = opts
+  if (!internal || typeof internal._get !== 'function') return undefined
+
+  let cookies = ''
+  let bkn = ''
+  try {
+    const ck = (await internal._get('get_cookies', { domain: 'qun.qq.com' })) as
+      | { cookies?: string; bkn?: string }
+      | undefined
+    cookies = typeof ck?.cookies === 'string' ? ck.cookies : ''
+    bkn = typeof ck?.bkn === 'string' ? ck.bkn : ''
+  } catch (e) {
+    logger?.debug?.(`荣誉榜兜底：取 cookie 失败（${e instanceof Error ? e.message : String(e)}）`)
+    return undefined
+  }
+  if (!cookies || !bkn) {
+    logger?.debug?.('荣誉榜兜底：没有可用的 qun.qq.com cookie/bkn，跳过')
+    return undefined
+  }
+
+  const fetchOne = async (
+    path: string,
+    params: Record<string, string | number>,
+  ): Promise<any | undefined> => {
+    const query = new URLSearchParams(
+      Object.entries({ ...params, bkn }).map(([k, v]) => [k, String(v)]),
+    ).toString()
+    try {
+      const res: any = await ctx.http.get(`${HONOR_BASE}${path}?${query}`, {
+        headers: { Cookie: cookies, Referer: HONOR_REFERER, 'User-Agent': HONOR_UA },
+        timeout: HONOR_TIMEOUT_MS,
+      })
+      // koishi 的 http 对 application/json 会自动解析；个别情况给到字符串，这里都兜住
+      const body = typeof res === 'string' ? JSON.parse(res) : res
+      if (!body || body.retcode !== 0) {
+        logger?.debug?.(`荣誉榜兜底：${path} retcode=${body?.retcode} msg=${body?.msg ?? ''}`)
+        return undefined
+      }
+      return body.data
+    } catch (e) {
+      logger?.debug?.(`荣誉榜兜底：${path} 请求失败（${e instanceof Error ? e.message : String(e)}）`)
+      return undefined
+    }
+  }
+
+  const [talkative, richer, emotion] = await Promise.all([
+    fetchOne('/cgi-bin/qunapp/honor_talkative', { gc: gid, num: 3000 }),
+    fetchOne('/cgi-bin/new_honor/list_honor/list_richer_honor', { group_code: gid, num: 3000, start: 0 }),
+    fetchOne('/cgi-bin/qunapp/honor_emotion', { gc: gid, num: 3000 }),
+  ])
+  if (!talkative && !richer && !emotion) return undefined
+
+  const info: NapHonorInfo = {
+    group_id: Number(gid) || undefined,
+    current_talkative: honorToEntry(talkative?.current_talkative),
+    talkative_list: honorToEntryList(talkative?.talkative_list),
+    performer_list: honorToEntryList(richer?.richer_honor_list),
+    emotion_list: honorToEntryList(emotion?.emotion_list),
+    // 新接口里没有对应数据：群聊炽热未在 SPA 中定位到，冒尖小春笋已被 QQ 下线
+    legend_list: [],
+    strong_newbie_list: [],
+  }
+
+  const total = info.talkative_list!.length + info.performer_list!.length + info.emotion_list!.length
+  if (total === 0 && !info.current_talkative) return undefined
+
+  // 兜底成功属于"过程细节"，用 debug 级别：只有打开 debug 开关时才输出，默认静默
+  logger?.debug?.(
+    `荣誉榜兜底成功（NapCat 解析因页面改版失效）：龙王 ${info.talkative_list!.length} 人、` +
+      `群聊之火 ${info.performer_list!.length} 人、快乐源泉 ${info.emotion_list!.length} 人`,
+  )
+  return info
 }

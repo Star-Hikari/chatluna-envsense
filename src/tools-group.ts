@@ -15,6 +15,7 @@ import {
 } from './format'
 import { describeShape, renderNoticeDetail, renderNoticePreview, unwrapNoticeList } from './notice'
 import {
+  fetchHonorsDirect,
   NapEssenceItem,
   NapHonorInfo,
   NapMsgRecord,
@@ -33,6 +34,15 @@ const groupIdSchema = z
   .string()
   .optional()
   .describe('群号；留空则使用当前会话所在的群')
+
+/** 荣誉榜是否全空（六个榜都空 + 当前龙王也没有） */
+function isHonorEmpty(h: NapHonorInfo | undefined): boolean {
+  if (!h) return true
+  const lists = [h.talkative_list, h.performer_list, h.legend_list, h.emotion_list, h.strong_newbie_list]
+  const anyList = lists.some((l) => Array.isArray(l) && l.length > 0)
+  const ct = h.current_talkative
+  return !anyList && !(ct && (ct.nickname || ct.user_id))
+}
 
 /** 精华消息 content 段数组 → 纯文本（图片记 [图]） */
 function flattenEssence(content: NapEssenceItem['content']): string {
@@ -362,43 +372,104 @@ export const groupToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
           const session = sessionFrom(runConfig)
           const gid = resolveGroupId(session, input.group_id)
           if (!gid) return '当前不在群聊中，且未提供 group_id。'
+          const honorsKey = `honors:${gid}`
           const res = await cachedCall<NapHonorInfo>({
             deps,
-            key: `honors:${gid}`,
+            key: honorsKey,
             label: '群荣誉',
             session,
             run: (i) => i.getGroupHonorInfo(gid, 'all'),
           })
           if (!res.ok) return res.error
-          const h = res.data || {}
+          let h = res.data || {}
+          deps.logger.debug(`群荣誉原始返回：${JSON.stringify(h).slice(0, 600)}`)
+
+          if (isHonorEmpty(h)) {
+            // 空结果不留缓存：NapCat 抓荣誉榜页面失败时会静默回全空数组，
+            // 缓存住就会让瞬时失败粘住整个 TTL（连带把修复前已写入的空缓存自愈掉）。
+            deps.cache.delete(honorsKey)
+
+            // NapCat 侧已确认的故障（2026-10-19 实测）：腾讯把荣誉榜页面从服务端渲染换成了 SPA，
+            // 页面 HTML 里不再有 window.__INITIAL_STATE__，而 NapCat 仍按老格式正则解析
+            // （napcat-core/apis/webapi.ts 的 getDataInternal）→ 四个 type 全部失败、静默回全空。
+            // 兜底：用同样的 cookie + bkn 直连新版 cgi 接口拿数据（见 honor-fallback.ts，等上游修好即可删）。
+            const internal = (session?.bot as any)?.internal
+            const direct = await fetchHonorsDirect({ ctx: deps.ctx, internal, gid, logger: deps.logger })
+            if (direct && !isHonorEmpty(direct)) {
+              h = direct
+            } else {
+              // 连兜底也拿不到：把可诊断的信息打出来（debug 关闭时也能看到）
+              // 安全：只记录 cookie 的**键名**与是否存在 skey，绝不输出 cookie 值。
+              let cookieHint = ''
+              if (internal && typeof internal._get === 'function') {
+                try {
+                  const ck = await internal._get('get_cookies', { domain: 'qun.qq.com' })
+                  const raw = typeof ck?.cookies === 'string' ? ck.cookies : ''
+                  const names = raw
+                    .split(';')
+                    .map((s: string) => s.split('=')[0].trim())
+                    .filter(Boolean)
+                  if (names.length === 0) cookieHint = '拿不到任何 qun.qq.com 的 cookie'
+                  else if (!names.includes('skey')) cookieHint = `拿到的 cookie 里没有 skey（只有 ${names.join('/')}）`
+                  else cookieHint = `cookie 看似正常（含 skey，共 ${names.length} 项）`
+                } catch (e) {
+                  cookieHint = `探测 cookie 失败（${e instanceof Error ? e.message : String(e)}）`
+                }
+              }
+              deps.logger.warn(
+                `群 ${gid} 荣誉榜返回全空，直连兜底也没取到：QQ 已把荣誉榜页面改成 SPA，` +
+                  'NapCat 仍在按旧的 window.__INITIAL_STATE__ 格式解析（其日志会打「获取类型 N 的荣誉信息失败」），' +
+                  '属于 NapCat 侧待修问题' +
+                  (cookieHint ? `；cookie 探测：${cookieHint}` : '') +
+                  '。可等待 NapCat 更新，或先把 group.activity 打开用活跃度统计回答"谁最活跃"。',
+              )
+            }
+          }
+
           const lines: string[] = [`群 ${gid} 荣誉榜：`]
           const entry = (list: NapHonorInfo['talkative_list'], name: string, withDays = false) => {
             if (!Array.isArray(list) || list.length === 0) return
             const shown = list
               .slice(0, 5)
-              .map((e) => `${e.nickname || '未知'} (${e.user_id ?? ''})${withDays && e.day_count ? ` x${e.day_count}天` : ''}`)
+              .map((e) => `${e.nickname || e.user_id || '未知'} (${e.user_id ?? ''})${withDays && e.day_count ? ` x${e.day_count}天` : ''}`)
               .join('、')
             lines.push(`${name}: ${shown}`)
           }
-          if (h.current_talkative?.nickname) {
-            lines.push(`当前龙王: ${h.current_talkative.nickname} (${h.current_talkative.user_id ?? ''})`)
+          // 实测 NapCat 会把 current_talkative 也回成 {}（无数据时），所以要用 nickname/user_id 双保险判断
+          const ct = h.current_talkative
+          if (ct && (ct.nickname || ct.user_id)) {
+            lines.push(`当前龙王: ${ct.nickname || '未知'} (${ct.user_id ?? ''})`)
           }
-          entry(h.talkative_list, '龙王（历史）')
-          entry(h.performer_list, '群聊之火')
+          entry(h.talkative_list, '龙王（历史）', true)
+          entry(h.performer_list, '群聊之火', true)
           entry(h.legend_list, '群聊炽热')
-          entry(h.emotion_list, '快乐源泉')
+          entry(h.emotion_list, '快乐源泉', true)
           entry(h.strong_newbie_list, '冒尖小春笋')
-          if (lines.length === 1) return `群 ${gid} 暂无荣誉数据（新群或成员均未获得称号）。`
+          if (lines.length === 1) {
+            // 读不到荣誉榜时给一条可行的替代路径（只有活跃度统计开着时才提，免得模型白跑一趟）
+            const fallback =
+              deps.config.group.activity !== false
+                ? '想知道谁最活跃，可以改用 group_activity 按最近的聊天记录统计。'
+                : ''
+            return (
+              `群 ${gid} 这次没看到荣誉数据——可能本群还没有荣誉称号，也可能这次没读进来（QQ 的荣誉榜页面时而读不到）。` +
+              fallback
+            )
+          }
           return lines.join('\n')
         },
         {
           name: 'group_honors',
           description: [
-            '你能看到这个群的荣誉榜：现在的龙王、历代龙王、群聊之火、群聊炽热、快乐源泉、冒尖小春笋等称号的获得者。',
+            '你能看到这个群的荣誉榜：现在的龙王、历代龙王、群聊之火、群聊炽热、快乐源泉等称号的获得者。',
             '',
             '当你想说清"群里谁最活跃""谁是龙王""这个群的气氛怎么样"时，优先看这里。',
             '- group_id：留空就是当前会话所在的群。',
             '- 它比一条条翻聊天记录省事得多，随口问"谁最活跃"时先用它。',
+            '- 这一页偶尔会读不到（QQ 侧的荣誉榜页面时好时坏）。真的没读到就如实说这次没看到，别说成"群里没有活跃的人"。',
+            ...(deps.config.group.activity !== false
+              ? ['- 读不到时，想知道谁最活跃可以改用 group_activity 从最近的聊天记录里统计。']
+              : []),
             `- ${PERCEPTION_NOTE}。`,
           ].join('\n'),
           schema: z.object({ group_id: groupIdSchema }),

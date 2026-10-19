@@ -10,6 +10,7 @@ import { TtlCache } from './napi'
 import { MinimalStorageService } from './avatar'
 import { groupToolDefs } from './tools-group'
 import { userToolDefs } from './tools-user'
+import { forwardToolDefs, registerQuoteForwardFix } from './tools-forward'
 
 export const name = 'chatluna-envsense'
 // required/optional 会被控制台插件页自动渲染为"必需服务/可选服务（已加载）"状态行（memes-api 模式）
@@ -37,7 +38,7 @@ export const usage = `
 
 <p><strong>ChatLuna 环境感知扩展</strong>：为 Agent（plugin 模式）提供一组<strong>环境感知工具</strong>，让模型按需了解自己所在的群、群成员、群公告、群荣誉 / 精华 / 打卡，以及某个 QQ 的资料卡、头像与获赞情况。</p>
 
-<p>纯工具形态，<strong>不注入提示词</strong>；所有工具都是只读的，只在 <strong>NapCat（onebot）</strong> 会话生效，由模型自主决定什么时候去看。</p>
+<p>纯工具形态，<strong>平时不注入任何提示词</strong>：不看就不花 token，由模型自己决定什么时候去看。所有工具只读，只在 <strong>NapCat（onebot）</strong> 会话生效。</p>
 
 <div class="note">在下方配置里可以逐项开关工具、调整缓存与图片投递方式；打开 <code>debug</code> 可查看详细日志。</div>
 
@@ -62,7 +63,7 @@ export function apply(ctx: Context, config: Config) {
   const slog = createSenseLogger(logger, () => config.debug === true)
 
   // 就绪摘要所需的两个状态：注册结果 + NapCat 版本（版本可能要等 bot 连上才知道）
-  let readySummary: { count: number } | null = null
+  let readySummary: { count: number; quoteFix: boolean } | null = null
   let napCatVersion = ''
   let versionProbeDone = false
   let readyLogged = false
@@ -72,6 +73,7 @@ export function apply(ctx: Context, config: Config) {
     readyLogged = true
     const parts = [
       `${readySummary.count} 个感知工具`,
+      readySummary.quoteFix ? '引用合并消息修复已开启' : '',
       `缓存 ${config.cacheTtlSeconds}s`,
       `头像 ${config.avatarDelivery}`,
       // napCatVersion 已含名字（实测 app_name 是 "NapCat.Onebot"），此处不要再补前缀
@@ -128,6 +130,7 @@ export function apply(ctx: Context, config: Config) {
 
     const g = config.group
     const u = config.user
+    const f = config.forward
     const enabledMap: Record<string, boolean> = {
       // 群域
       group_overview: g.overview,
@@ -143,15 +146,30 @@ export function apply(ctx: Context, config: Config) {
       user_profile: u.profile,
       user_avatar: u.avatar,
       profile_reaction_stats: u.reactionStats,
+      // 合并转发
+      read_forward_msg: f.tool,
     }
 
-    const allDefs: Record<string, (d: ToolDeps) => ChatLunaTool> = { ...groupToolDefs, ...userToolDefs }
+    const allDefs: Record<string, (d: ToolDeps) => ChatLunaTool> = { ...groupToolDefs, ...userToolDefs, ...forwardToolDefs }
 
     const registered: string[] = []
     const failed: string[] = []
+    const skipped: string[] = []
     const disposers: (() => void)[] = []
     for (const [toolName, build] of Object.entries(allDefs)) {
       if (enabledMap[toolName] === false) continue
+      // 同名工具守卫：chatluna 的 registerTool 是"按名字覆盖 + dispose 时按名字删除"，
+      // 和别的插件撞名会互相顶掉（HMR 时尤其明显）。这里只在名字被**其它插件**占用时让路，
+      // 自己的残留注册（meta.group === 'envsense'）照常覆盖。
+      const occupied = ctx.chatluna.platform.getTool(toolName)
+      if (occupied?.meta != null && occupied.meta.group !== 'envsense') {
+        skipped.push(toolName)
+        logger.warn(
+          `工具名 ${toolName} 已被其它插件占用（meta.group=${occupied.meta.group ?? '未知'}），本插件跳过注册以免互相覆盖。` +
+            `若要使用本插件的实现，请停用同名工具的来源（例如 chatluna-forward-msg 的读取工具）。`,
+        )
+        continue
+      }
       try {
         const dispose = ctx.chatluna.platform.registerTool(toolName, build(deps))
         disposers.push(dispose)
@@ -161,13 +179,37 @@ export function apply(ctx: Context, config: Config) {
         logger.error(`注册工具 ${toolName} 失败:`, e)
       }
     }
+
+    // 引用修复：chatluna 只在最外层消息上检查 forward 状态，引用（回复）里的聊天记录永远拿不到
+    // <forward id> 标记 —— 这里替它补上。钩子只做本地字符串/元素操作，异常全吞，不会影响对话。
+    let quoteFixOn = false
+    if (f.quoteFix) {
+      try {
+        disposers.push(registerQuoteForwardFix(ctx, deps))
+        quoteFixOn = true
+        const readToolReady =
+          registered.includes('read_forward_msg') ||
+          skipped.includes('read_forward_msg') ||
+          ctx.chatluna.platform.getTool('read_forward_msg')?.meta != null
+        if (!readToolReady) {
+          logger.warn(
+            '已开启「引用合并消息修复」，但当前没有可用的 read_forward_msg 工具' +
+              '（本插件的工具开关关着，也没装 chatluna-forward-msg）：标记会出现，但没人能读它。',
+          )
+        }
+        slog.info('已启用引用合并消息修复：被引用/回复的聊天记录会补上 <forward id> 标记')
+      } catch (e) {
+        logger.error('挂载引用合并消息修复失败（该功能本次未生效）:', e)
+      }
+    }
+
     // 详细日志：完整工具清单；关闭 debug 时改由下面的一行就绪信息概括
     slog.info(
       registered.length > 0
         ? `已注册 ${registered.length} 个环境感知工具: ${briefList(registered)}`
         : '所有感知工具均已禁用，未注册任何工具',
     )
-    readySummary = { count: registered.length }
+    readySummary = { count: registered.length, quoteFix: quoteFixOn }
     flushReady()
 
     // 状态卡片：注册结果摘要（danger > warning > success）
@@ -180,10 +222,20 @@ export function apply(ctx: Context, config: Config) {
         ],
       }
     } else if (registered.length) {
-      toolStatus = { type: 'success', lines: [`已注册 ${registered.length} 个环境感知工具`, briefList(registered)] }
+      toolStatus = {
+        type: 'success',
+        lines: [`已注册 ${registered.length} 个环境感知工具`, briefList(registered)],
+      }
     } else {
       toolStatus = { type: 'warning', lines: ['所有感知工具均已禁用，未注册任何工具'] }
     }
+    if (skipped.length) {
+      toolStatus = {
+        type: toolStatus.type === 'success' ? 'warning' : toolStatus.type,
+        lines: [...toolStatus.lines, `跳过 ${skipped.length} 个与其它插件同名的工具：${briefList(skipped)}`],
+      }
+    }
+    if (quoteFixOn) toolStatus = { ...toolStatus, lines: [...toolStatus.lines, '引用合并消息修复：已开启'] }
     renderStatus()
 
     // scope dispose（停服/HMR）时逐一注销
@@ -246,8 +298,42 @@ export function apply(ctx: Context, config: Config) {
     renderStatus()
     logNapCatVersion()
   }
+
+  /**
+   * 同名工具归属检查。
+   *
+   * 背景：chatluna 的 platform.registerTool 是"按名字覆盖"，而 chatluna-forward-msg
+   * 也注册一个叫 read_forward_msg 的工具，且它在 ready 期（还会 await 几个初始化）才注册，
+   * 所以两者同时开启时对方会覆盖本插件的实现；对方被卸载/HMR 时又可能把名字删掉。
+   * 这里挂在 chatluna/tool-updated 上做一次带防抖的检查，把结果明确写进日志，
+   * 免得出现"改了配置却没生效"这种无声的困惑。只在归属发生变化时打一条。
+   */
+  let forwardOwnerWarned: string | null = null
+  const checkForwardToolOwner = () => {
+    if (config.forward?.tool === false) return
+    try {
+      const owner = ctx.chatluna.platform.getTool('read_forward_msg')?.meta?.group ?? null
+      if (owner != null && owner !== 'envsense') {
+        if (forwardOwnerWarned === owner) return
+        forwardOwnerWarned = owner
+        logger.warn(
+          `read_forward_msg 目前由其它插件提供（meta.group=${owner}），本插件的同名实现被覆盖了——` +
+            '功能仍然可用，只是走的是对方的实现；想让本插件接管，请停用对方（例如 chatluna-forward-msg 的读取工具）。',
+        )
+      } else if (forwardOwnerWarned != null) {
+        forwardOwnerWarned = null
+        slog.info('read_forward_msg 已切回本插件的实现')
+      }
+    } catch (e) {
+      slog.debug(`同名工具归属检查失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   ctx.on('ready', refresh)
   ctx.on('bot-connect', refresh)
+  // 工具表每次变动都会发 chatluna/tool-updated：延后一拍（等同一批注册做完）再核对归属
+  ctx.on('chatluna/tool-updated', () => ctx.setTimeout(checkForwardToolOwner, 50))
   // HMR 重载时 ready 不会再次触发，这里立即探测一次（无 bot 时内部会直接返回，等事件再试）
   refresh()
+  ctx.setTimeout(checkForwardToolOwner, 800)
 }

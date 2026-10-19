@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-chatluna-envsense",
-  "description": "ChatLuna 环境感知工具集：为 Agent（plugin）模式按需注册群聊与用户信息查询工具（纯只读，仅 NapCat/onebot 生效）",
-  "version": "1.0.1",
+  "description": "ChatLuna 环境感知工具集：为 Agent（plugin）模式按需注册群聊/用户信息查询与合并转发（聊天记录）读取工具，并修复 chatluna 对引用合并消息的处理（仅 NapCat/onebot 生效）",
+  "version": "1.1.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -33,8 +33,8 @@
   },
   "koishi": {
     "description": {
-      "zh": "ChatLuna 环境感知工具集：为 Agent（plugin）模式按需提供群概况、成员、公告、荣誉、精华、打卡、头像与 QQ 资料卡、获赞等只读查询；图片取回真实字节再交给模型。仅 NapCat(onebot11) 生效。",
-      "en": "Read-only environment awareness tools for ChatLuna agent mode: group info, members, notices, honors, essence, sign-in, avatars and QQ profile stats, on demand. Images are fetched as real bytes instead of bare links. NapCat(onebot11) only."
+      "zh": "ChatLuna 环境感知工具集：为 Agent（plugin）模式按需提供群概况、成员、公告、荣誉、精华、打卡、头像与 QQ 资料卡、获赞等只读查询，并支持读取合并转发（聊天记录）与修复 chatluna 对引用合并消息的处理；图片取回真实字节再交给模型。仅 NapCat(onebot11) 生效。",
+      "en": "Environment awareness tools for ChatLuna agent mode: group info, members, notices, honors, essence, sign-in, avatars, QQ profile stats and merged-forward (chat record) reading, plus a fix for ChatLuna's quoted-forward handling. Images are fetched as real bytes instead of bare links. NapCat(onebot11) only."
     },
     "service": {
       "required": [

@@ -47,6 +47,20 @@ export interface UserSenseConfig {
   reactionStats: boolean
 }
 
+/** 合并转发（聊天记录）与 chatluna 引用修复 */
+export interface ForwardSenseConfig {
+  /** read_forward_msg：读取合并转发聊天记录的工具 */
+  tool: boolean
+  /** 修复 chatluna 对引用合并消息的处理（补 <forward id> 标记） */
+  quoteFix: boolean
+  /** 嵌套聊天记录解析层数 */
+  maxDepth: number
+  /** 单次读取最多渲染多少条 */
+  maxEntries: number
+  /** 单次读取输出文本的字数上限 */
+  maxChars: number
+}
+
 export interface Config {
   /** 是否输出详细日志（工具调用明细、原始返回、取图过程、启动清单等） */
   debug: boolean
@@ -58,6 +72,8 @@ export interface Config {
   avatarSize: number
   /** base64 内联时允许的单图最大字节数（KB） */
   avatarMaxKb: number
+  /** 合并转发（聊天记录）开关与参数 */
+  forward: ForwardSenseConfig
   group: GroupSenseConfig
   user: UserSenseConfig
 }
@@ -81,9 +97,26 @@ export const Config = Schema.intersect([
       Schema.const(40).description('40（最小，仅够辨认）'),
       Schema.const(0).description('0（原图，体积最大）'),
     ]).default(640)
-      .description('头像请求的尺寸档位。qlogo 只接受 0/40/100/140/640，其余值会返回 HTTP 400；插件会按 640→140→100→40→0 自动兜底，所以这里填错也不会瞎掉'),
+      .description('头像请求的尺寸档位。qlogo 只接受 0/40/100/140/640，其余值会返回 HTTP 400；插件会按 640→140→100→40→0 自动兜底'),
     avatarMaxKb: Schema.number().min(64).max(2048).default(1536)
       .description('base64 内联时单张图片的字节上限（KB）：超过则放弃内联并告知模型取图失败'),
+
+    // ── 合并转发（聊天记录）──
+    // 放在「通用」末尾：前两项是与 chatluna 行为相关的开关，后三项是读取时的限额。
+    forward: Schema.object({
+      tool: Schema.boolean().default(true)
+        .description('read_forward_msg：注册"打开合并转发聊天记录"工具，让模型能读到那一叠里的每一条（自研实现，不依赖 chatluna-forward-msg）'),
+      quoteFix: Schema.boolean().default(true)
+        .description('修复 chatluna 对引用合并消息的处理：被引用/回复的聊天记录会补上 <forward id="…"> 标记，从而能被上面的工具读到（chatluna 自身只在直发时补标记，引用那条永远是空的）'),
+      maxDepth: Schema.number().min(1).max(8).default(3)
+        .description('聊天记录里还套着聊天记录时，最多展开几层'),
+      maxEntries: Schema.number().min(1).max(200).default(40)
+        .description('单次读取最多呈现多少条（超出会截断并注明）'),
+      maxChars: Schema.number().min(200).max(20000).default(4000)
+        .description('单次读取输出文本的字数上限（JP/CN 约 1 字 ≈ 1 token，用于控制上下文开销）'),
+    })
+      .default({} as ForwardSenseConfig)
+      .description('合并转发（聊天记录）'),
   }).description('通用'),
 
   // ── 群聊感知 ──
