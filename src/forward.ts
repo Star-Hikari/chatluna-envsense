@@ -1,6 +1,6 @@
 import type { Session } from 'koishi'
 import type { SenseLogger } from './log'
-import { callApi, OneBotInternal, TtlCache } from './napi'
+import { ApiLimiter, callApi, OneBotInternal, TtlCache } from './napi'
 import { fmtTsLoose, nickOf, truncate } from './format'
 
 // ─────────────────────────────────────────────
@@ -424,6 +424,8 @@ export interface ReadForwardOptions {
   maxEntries: number
   maxChars: number
   logger: SenseLogger
+  /** 只读 API 并发闸门（与其它查询共用） */
+  limiter?: ApiLimiter
   /** 命中同一叠记录时直接复用上次的渲染结果 */
   cache?: TtlCache
 }
@@ -448,6 +450,7 @@ export async function readForwardTranscript(options: ReadForwardOptions): Promis
     label: '聊天记录',
     timeoutMs: 20000,
     logger,
+    limiter: options.limiter,
     run: async (internal) => {
       for (const id of targets) {
         const messages = await fetchForwardMessages(internal, id, logger)

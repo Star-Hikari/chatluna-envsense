@@ -4,7 +4,7 @@ import type { ChatLunaTool } from 'koishi-plugin-chatluna/llm-core/platform/type
 import { ModelCapabilities } from 'koishi-plugin-chatluna/llm-core/platform/types'
 import type { Config } from './config'
 import type { SenseLogger } from './log'
-import { ApiResult, callApi, OneBotInternal, TtlCache } from './napi'
+import { ApiLimiter, ApiResult, callApi, OneBotInternal, TtlCache } from './napi'
 import { AvatarDelivery, loadAvatarImage, MinimalStorageService, unsupportedVisionText } from './avatar'
 
 // ─────────────────────────────────────────────
@@ -20,6 +20,10 @@ export interface ToolDeps {
   ctx: Context
   /** chatluna_storage（可选服务，未安装时 undefined，头像退化为 base64 内联） */
   storage?: MinimalStorageService
+  /** 只读 API 的全局并发闸门：多会话同时查 NapCat 时最多 4 个在飞 */
+  limiter: ApiLimiter
+  /** 同 key 查询的 in-flight 去重：多个会话同时查同一个群/成员时只发一次请求 */
+  inflight: Map<string, Promise<ApiResult<any>>>
 }
 
 /** 从 langchain 运行配置取本次会话（chatluna 在 plugin 链里注入 configurable.session，见调研 §7.3） */
@@ -149,14 +153,34 @@ export async function cachedCall<T>(opts: {
 }): Promise<ApiResult<T>> {
   const hit = opts.deps.cache.get<T>(opts.key)
   if (hit !== undefined) return { ok: true, data: hit }
-  const res = await callApi<T>({
-    session: opts.session,
-    label: opts.label,
-    logger: opts.deps.logger,
-    run: opts.run,
-  })
-  if (res.ok) opts.deps.cache.set(opts.key, res.data)
-  return res
+
+  // 多个会话同时查同一份数据：只让第一个真正发请求，其余等它的结果。
+  // in-flight key 额外带 selfId：避免 A 账号离线失败时把 B 账号的请求也拖下水；
+  // 缓存 key 仍共享（同一群/成员的查询结果与账号无关）。
+  const flightKey = `${opts.key}@${opts.session?.selfId ?? ''}`
+  const running = opts.deps.inflight.get(flightKey)
+  if (running) return running as Promise<ApiResult<T>>
+
+  const task = (async (): Promise<ApiResult<T>> => {
+    const res = await callApi<T>({
+      session: opts.session,
+      label: opts.label,
+      logger: opts.deps.logger,
+      limiter: opts.deps.limiter,
+      run: opts.run,
+    })
+    if (res.ok) opts.deps.cache.set(opts.key, res.data)
+    return res
+  })()
+  opts.deps.inflight.set(flightKey, task as Promise<ApiResult<any>>)
+  try {
+    return await task
+  } finally {
+    // 只删除自己：正常情况 key 唯一；防御性地判断一次，避免极端情况下误删新任务
+    if (opts.deps.inflight.get(flightKey) === (task as Promise<ApiResult<any>>)) {
+      opts.deps.inflight.delete(flightKey)
+    }
+  }
 }
 
 /** 工具名 + 注册描述符 + 启用开关 的三元组（index 按 enabled 过滤注册） */

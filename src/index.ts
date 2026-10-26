@@ -6,22 +6,36 @@ import { createLogger } from 'koishi-plugin-chatluna/utils/logger'
 import { Config } from './config'
 import { ToolDeps } from './common'
 import { createSenseLogger } from './log'
-import { TtlCache } from './napi'
+import { createApiLimiter, TtlCache } from './napi'
 import { MinimalStorageService } from './avatar'
 import { groupToolDefs } from './tools-group'
 import { userToolDefs } from './tools-user'
 import { forwardToolDefs, registerQuoteForwardFix } from './tools-forward'
+import { ActionState } from './action-state'
+import { ActionRuntime } from './actions'
+import { startAutoCheckin } from './auto-checkin'
+import { makeActionToolDefs } from './tools-action'
 
 export const name = 'chatluna-envsense'
 // required/optional 会被控制台插件页自动渲染为"必需服务/可选服务（已加载）"状态行（memes-api 模式）
 // chatluna_storage 来自 chatluna-storage-service：装了就让头像转存临时文件，没装自动降级 base64 内联
-export const inject = { required: ['chatluna'], optional: ['notifier', 'chatluna_storage'] }
+// database 只用于主动工具的"当天一次"状态持久化；没装时自动退化为内存
+export const inject = { required: ['chatluna'], optional: ['notifier', 'chatluna_storage', 'database'] }
 
 export { Config } from './config'
 // 日志门面也导出：便于冒烟测试直接验证 debug 门控，其它插件想沿用同一套
 // "debug 控制过程日志、warn/error 始终输出"的策略时也可以复用。
 export { createSenseLogger } from './log'
 export type { SenseLogger } from './log'
+// 主动工具的纯函数也导出：冒烟测试直接验证"本地日期/白名单/排期"，不依赖真实定时器
+export { actionKey, localDateKey } from './action-state'
+export { isGroupActionAllowed } from './actions'
+export { computeNextRun, isDailyTimePassed } from './auto-checkin'
+export { startAutoCheckin } from './auto-checkin'
+// 供冒烟/诊断构造离线 runtime（不经过 Koishi 生命周期）
+export { ActionRuntime, resolveAutoGroups, runAutoCheckin } from './actions'
+export { ActionState } from './action-state'
+export { createApiLimiter } from './napi'
 
 // 控制台「使用说明」页。控制台用 k-markdown 的 unsafe 模式渲染 usage，可内嵌 <style>。
 // 只放简介：具体工具、配置项、投递方式都不在这里展开（配置页自己会渲染，README 里有完整说明）。
@@ -38,9 +52,9 @@ export const usage = `
 
 <p><strong>ChatLuna 环境感知扩展</strong>：为 Agent（plugin 模式）提供一组<strong>环境感知工具</strong>，让模型按需了解自己所在的群、群成员、群公告、群荣誉 / 精华 / 打卡，以及某个 QQ 的资料卡、头像与获赞情况。</p>
 
-<p>纯工具形态，<strong>平时不注入任何提示词</strong>：不看就不花 token，由模型自己决定什么时候去看。所有工具只读，只在 <strong>NapCat（onebot）</strong> 会话生效。</p>
+<p>查询工具<strong>只读</strong>，平时<strong>不注入任何提示词</strong>：不看就不花 token。另有默认关闭的<strong>主动工具</strong>（当前群打卡、给当前发言人/私聊对象点赞），只作用于当前会话环境，并受白名单与"每天一次"约束。全部仅 <strong>NapCat（onebot）</strong> 生效。</p>
 
-<div class="note">在下方配置里可以逐项开关工具、调整缓存与图片投递方式；打开 <code>debug</code> 可查看详细日志。</div>
+<div class="note">在下方配置里可以逐项开关工具、调整缓存与图片投递方式；主动工具默认关闭，打开 <code>debug</code> 可查看详细日志。</div>
 
 </div>
 `.trim()
@@ -62,8 +76,22 @@ export function apply(ctx: Context, config: Config) {
   // 详细日志门面：debug 关闭时 info/debug 静默，只留 warn/error（报错类）
   const slog = createSenseLogger(logger, () => config.debug === true)
 
+  // 主动工具的"当天一次"状态：默认内存；装了 database 就持久化（重启不重复）。
+  // 没有 database 时 apply 仍可正常工作，只是重启后会忘记今天做过什么。
+  const actionState = new ActionState(slog)
+  const actionRuntime = new ActionRuntime({ ctx, config, logger: slog, state: actionState })
+  // 只读查询的并发闸门 + 同 key in-flight 去重：多会话同时查 NapCat 时不会无限并发/重复请求
+  const apiLimiter = createApiLimiter(4)
+  const inflight = new Map<string, Promise<any>>()
+  // 只有真的开了主动能力才建表/注入 database，默认配置下不碰数据库
+  if (config.action.checkin.enabled || config.action.like.enabled || config.action.checkin.auto.enabled) {
+    ctx.inject(['database'], (ctx) => {
+      actionState.attachDatabase(ctx)
+    })
+  }
+
   // 就绪摘要所需的两个状态：注册结果 + NapCat 版本（版本可能要等 bot 连上才知道）
-  let readySummary: { count: number; quoteFix: boolean } | null = null
+  let readySummary: { count: number; quoteFix: boolean; actionCount: number; auto: boolean } | null = null
   let napCatVersion = ''
   let versionProbeDone = false
   let readyLogged = false
@@ -72,7 +100,9 @@ export function apply(ctx: Context, config: Config) {
     if (readyLogged || !readySummary || !versionProbeDone) return
     readyLogged = true
     const parts = [
-      `${readySummary.count} 个感知工具`,
+      `${readySummary.count} 个工具`,
+      readySummary.actionCount > 0 ? `主动工具 ${readySummary.actionCount} 个` : '',
+      readySummary.auto ? '自动打卡已开启' : '',
       readySummary.quoteFix ? '引用合并消息修复已开启' : '',
       `缓存 ${config.cacheTtlSeconds}s`,
       `头像 ${config.avatarDelivery}`,
@@ -126,11 +156,14 @@ export function apply(ctx: Context, config: Config) {
       logger: slog,
       ctx,
       storage: toolDeps.storage,
+      limiter: apiLimiter,
+      inflight,
     }
 
     const g = config.group
     const u = config.user
     const f = config.forward
+    const a = config.action
     const enabledMap: Record<string, boolean> = {
       // 群域
       group_overview: g.overview,
@@ -148,9 +181,17 @@ export function apply(ctx: Context, config: Config) {
       profile_reaction_stats: u.reactionStats,
       // 合并转发
       read_forward_msg: f.tool,
+      // 主动工具（会改变 QQ 侧状态，默认关闭）
+      group_checkin: a.checkin.enabled,
+      profile_like: a.like.enabled,
     }
 
-    const allDefs: Record<string, (d: ToolDeps) => ChatLunaTool> = { ...groupToolDefs, ...userToolDefs, ...forwardToolDefs }
+    const allDefs: Record<string, (d: ToolDeps) => ChatLunaTool> = {
+      ...groupToolDefs,
+      ...userToolDefs,
+      ...forwardToolDefs,
+      ...makeActionToolDefs(actionRuntime),
+    }
 
     const registered: string[] = []
     const failed: string[] = []
@@ -160,9 +201,10 @@ export function apply(ctx: Context, config: Config) {
       if (enabledMap[toolName] === false) continue
       // 同名工具守卫：chatluna 的 registerTool 是"按名字覆盖 + dispose 时按名字删除"，
       // 和别的插件撞名会互相顶掉（HMR 时尤其明显）。这里只在名字被**其它插件**占用时让路，
-      // 自己的残留注册（meta.group === 'envsense'）照常覆盖。
+      // 自己的残留注册（主动工具的 meta.group 是 envsense-action）照常覆盖。
       const occupied = ctx.chatluna.platform.getTool(toolName)
-      if (occupied?.meta != null && occupied.meta.group !== 'envsense') {
+      const ownGroup = (group?: string) => typeof group === 'string' && (group === 'envsense' || group.startsWith('envsense-'))
+      if (occupied?.meta != null && !ownGroup(occupied.meta.group)) {
         skipped.push(toolName)
         logger.warn(
           `工具名 ${toolName} 已被其它插件占用（meta.group=${occupied.meta.group ?? '未知'}），本插件跳过注册以免互相覆盖。` +
@@ -177,6 +219,25 @@ export function apply(ctx: Context, config: Config) {
       } catch (e) {
         failed.push(toolName)
         logger.error(`注册工具 ${toolName} 失败:`, e)
+      }
+    }
+
+    const ACTION_TOOL_NAMES = ['group_checkin', 'profile_like']
+    const actionTools = registered.filter((name) => ACTION_TOOL_NAMES.includes(name))
+    const autoGroups = a.checkin.auto.groups
+      .map((id) => String(id).trim())
+      .filter((id) => /^\d+$/.test(id))
+    const allowedAutoGroups = autoGroups.filter(
+      (id) => !a.common.whitelistEnabled || a.common.groups.some((g) => String(g).trim() === id),
+    )
+    let autoOn = false
+    if (a.checkin.auto.enabled) {
+      try {
+        disposers.push(startAutoCheckin(actionRuntime))
+        // 列表为空/全部被白名单挡掉时调度器不会执行任何群，摘要里也不要说"已开启"
+        autoOn = allowedAutoGroups.length > 0
+      } catch (e) {
+        logger.error('启动自动打卡失败（该功能本次未生效）:', e)
       }
     }
 
@@ -206,11 +267,18 @@ export function apply(ctx: Context, config: Config) {
     // 详细日志：完整工具清单；关闭 debug 时改由下面的一行就绪信息概括
     slog.info(
       registered.length > 0
-        ? `已注册 ${registered.length} 个环境感知工具: ${briefList(registered)}`
-        : '所有感知工具均已禁用，未注册任何工具',
+        ? `已注册 ${registered.length} 个工具: ${briefList(registered)}`
+        : '所有工具均已禁用，未注册任何工具',
     )
-    readySummary = { count: registered.length, quoteFix: quoteFixOn }
+    readySummary = { count: registered.length, quoteFix: quoteFixOn, actionCount: actionTools.length, auto: autoOn }
     flushReady()
+
+    // 主动工具的摘要（开关全部关闭时不占行）
+    const actionBits = actionTools.map((name) => (name === 'group_checkin' ? '群打卡' : '资料卡点赞'))
+    const actionSummary =
+      actionBits.length || autoOn
+        ? `主动工具：${actionBits.length ? actionBits.join('、') : '自动打卡'}${autoOn && actionBits.length ? '；自动打卡已开启' : ''}`
+        : ''
 
     // 状态卡片：注册结果摘要（danger > warning > success）
     if (failed.length) {
@@ -224,10 +292,10 @@ export function apply(ctx: Context, config: Config) {
     } else if (registered.length) {
       toolStatus = {
         type: 'success',
-        lines: [`已注册 ${registered.length} 个环境感知工具`, briefList(registered)],
+        lines: [`已注册 ${registered.length} 个工具`, briefList(registered)],
       }
     } else {
-      toolStatus = { type: 'warning', lines: ['所有感知工具均已禁用，未注册任何工具'] }
+      toolStatus = { type: 'warning', lines: ['所有工具均已禁用，未注册任何工具'] }
     }
     if (skipped.length) {
       toolStatus = {
@@ -236,6 +304,27 @@ export function apply(ctx: Context, config: Config) {
       }
     }
     if (quoteFixOn) toolStatus = { ...toolStatus, lines: [...toolStatus.lines, '引用合并消息修复：已开启'] }
+    if (actionSummary) toolStatus = { ...toolStatus, lines: [...toolStatus.lines, actionSummary] }
+    if (
+      a.common.whitelistEnabled &&
+      a.common.groups.length === 0 &&
+      (a.checkin.enabled || a.like.enabled || a.checkin.auto.enabled)
+    ) {
+      toolStatus = {
+        type: 'warning',
+        lines: [...toolStatus.lines, '主动工具白名单已开启但为空：所有群都不能使用主动工具（自动打卡也不会执行）'],
+      }
+    } else if (a.checkin.auto.enabled && autoGroups.length === 0) {
+      toolStatus = {
+        type: 'warning',
+        lines: [...toolStatus.lines, '自动打卡已开启但自动打卡群列表为空：不会自动执行（不会回退到全部群）'],
+      }
+    } else if (a.checkin.auto.enabled && allowedAutoGroups.length === 0) {
+      toolStatus = {
+        type: 'warning',
+        lines: [...toolStatus.lines, '自动打卡群都不在主动工具白名单内：不会自动执行'],
+      }
+    }
     renderStatus()
 
     // scope dispose（停服/HMR）时逐一注销

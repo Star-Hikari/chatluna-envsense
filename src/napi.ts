@@ -13,6 +13,8 @@ import type { SenseLogger } from './log'
  */
 export interface OneBotInternal {
   getGroupInfo(group_id: string | number, no_cache?: boolean): Promise<OnebotGroup>
+  /** 我加入的所有群（自动打卡用它过滤掉已经退出的群；不再用于"枚举全部群打卡"） */
+  getGroupList(no_cache?: boolean): Promise<OnebotGroup[]>
   getGroupMemberList(group_id: string | number): Promise<OnebotGroupMember[]>
   getGroupMemberInfo(group_id: string | number, user_id: string | number, no_cache?: boolean): Promise<OnebotGroupMember>
   /** action: _get_group_notice（公告，WebApi 通道） */
@@ -33,6 +35,22 @@ export interface OneBotInternal {
   getMsg(message_id: string | number): Promise<Record<string, any>>
   /** 底层通道：adapter 未包装的 action 由此直发（retcode!=0 抛 SenderError） */
   _get(action: string, params?: Record<string, unknown>): Promise<any>
+  /**
+   * adapter 的原始请求通道（由连接层在在线期间注入；断开即 delete）。
+   * 与 _get 的区别：**不抛 SenderError**，返回完整信封，能读到 NapCat 的 message/wording。
+   * 主动工具（群打卡/点赞）必须用它，否则错误原因会丢。
+   */
+  _request?(action: string, params?: Record<string, unknown>): Promise<OneBotEnvelope>
+}
+
+/** OneBot/NapCat 的统一响应信封 */
+export interface OneBotEnvelope<T = any> {
+  status?: string
+  retcode: number
+  data?: T
+  /** NapCat 的具体错误文案（如"点赞失败 今日同一好友点赞数已达上限"） */
+  message?: string
+  wording?: string
 }
 
 /** get_forward_msg 返回的单条记录（只声明用到的字段） */
@@ -243,7 +261,58 @@ function briefError(e: unknown): string {
 }
 
 /**
- * 统一 API 调用包装：取 internal → 超时 → 错误归一化为 { ok:false, error }。
+ * 只读 API 的并发闸门。
+ *
+ * 多个会话可以同时请求 NapCat（尤其是 WebApi 类接口：成员列表/公告/荣誉/历史消息），
+ * 不限制的话一次群活动就可能并发几十个请求。这里做成"最多 N 个在飞、其余排队"，
+ * 排队期间不开始计时（超时从真正拿到槽位后算），避免超时后任务还在后台补发请求。
+ */
+export interface ApiLimiter {
+  run<T>(fn: () => Promise<T>): Promise<T>
+}
+
+export function createApiLimiter(maxConcurrent = 4, maxQueue = 100): ApiLimiter {
+  const limit = Math.max(1, Math.floor(maxConcurrent))
+  const queueLimit = Math.max(limit, Math.floor(maxQueue))
+  let active = 0
+  const queue: Array<() => void> = []
+
+  const next = () => {
+    while (active < limit && queue.length > 0) {
+      active++
+      const start = queue.shift()!
+      start()
+    }
+  }
+
+  return {
+    run<T>(fn: () => Promise<T>): Promise<T> {
+      return new Promise<T>((resolve, reject) => {
+        // 队列也不设上限的话，突发流量会把任务堆在内存里；超限直接 fail-fast
+        if (active >= limit && queue.length >= queueLimit) {
+          reject(new Error('当前查询太多了，排队已满，请稍后再试'))
+          return
+        }
+        queue.push(() => {
+          void (async () => {
+            try {
+              resolve(await fn())
+            } catch (e) {
+              reject(e)
+            } finally {
+              active--
+              next()
+            }
+          })()
+        })
+        next()
+      })
+    },
+  }
+}
+
+/**
+ * 统一 API 调用包装：取 internal → 并发闸门 → 超时 → 错误归一化为 { ok:false, error }。
  * 工具层拿到 error 直接作为 observation 文本回喂模型。
  */
 export async function callApi<T>(opts: {
@@ -251,6 +320,8 @@ export async function callApi<T>(opts: {
   label: string
   timeoutMs?: number
   logger: SenseLogger
+  /** 只读 API 并发闸门（可选；不传则直接执行，仍带超时） */
+  limiter?: ApiLimiter
   run: (internal: OneBotInternal) => Promise<T>
 }): Promise<ApiResult<T>> {
   const internal = (opts.session?.bot as any)?.internal as OneBotInternal | undefined
@@ -258,13 +329,22 @@ export async function callApi<T>(opts: {
     return { ok: false, error: '我现在看不到这些信息：当前会话不是 NapCat(onebot) 机器人。' }
   }
   const timeoutMs = opts.timeoutMs ?? 15000
+  // 超时从"真正开始执行"算，不把排队等待算进去；也不会在超时后留下一个排队任务去补发请求
+  const execute = async (): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race<T>([
+        opts.run(internal),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`等太久没等到（${timeoutMs / 1000}s）`)), timeoutMs)
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
   try {
-    const data = await Promise.race<T>([
-      opts.run(internal),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`等太久没等到（${timeoutMs / 1000}s）`)), timeoutMs),
-      ),
-    ])
+    const data = opts.limiter ? await opts.limiter.run(execute) : await execute()
     return { ok: true, data }
   } catch (e) {
     opts.logger?.debug?.(`[${opts.label}] API 失败:`, e)
@@ -276,6 +356,48 @@ export async function callApi<T>(opts: {
 /** adapter 未包装 action 的直发包装（get_group_msg_history 带 count / 资料卡互动数据 get_profile_like） */
 export function rawGet(internal: OneBotInternal, action: string, params: Record<string, unknown>): Promise<any> {
   return internal._get(action, params)
+}
+
+/** 当前 internal 是否真的能发原始请求（WS 断开时 adapter 会删掉 _request） */
+export function canRawRequest(internal: OneBotInternal | undefined): boolean {
+  return !!internal && typeof internal._request === 'function'
+}
+
+/**
+ * 主动工具专用：发原始请求并拿完整信封。
+ *
+ * 为什么不用 `_get`：adapter 的 `_get` 在 retcode!=0 时抛 SenderError，
+ * 而 SenderError.message 只有 action/args/retcode，**NapCat 的 message 会丢**；
+ * 对于点赞这种依赖"今日同一好友点赞数已达上限 / 账号转换失败"区分的操作，必须读原文。
+ *
+ * 永远不抛错：传输失败/超时归一化为 `{ retcode: -1, message }`，由调用侧决定提示文案。
+ */
+export async function rawRequest<T = any>(
+  internal: OneBotInternal | undefined,
+  action: string,
+  params: Record<string, unknown> = {},
+  timeoutMs = 15_000,
+): Promise<OneBotEnvelope<T>> {
+  if (!canRawRequest(internal)) {
+    return { retcode: -1, message: '当前没有在线的 NapCat 连接' }
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const response = await Promise.race([
+      internal!._request!(action, params),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`等太久没等到（${timeoutMs / 1000}s）`)), timeoutMs)
+      }),
+    ])
+    if (!response || typeof response !== 'object' || typeof response.retcode !== 'number') {
+      return { retcode: -1, message: '返回格式异常' }
+    }
+    return response as OneBotEnvelope<T>
+  } catch (e) {
+    return { retcode: -1, message: e instanceof Error ? e.message : String(e) }
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 // ── TTL 缓存 ──
@@ -298,10 +420,16 @@ export class TtlCache {
 
   set(key: string, value: unknown): void {
     if (this.ttlSeconds <= 0) return
-    // 简单防膨胀：条目过多时清掉已过期的
-    if (this.map.size > 200) {
+    // 防膨胀：先清过期；仍超上限时按插入顺序淘汰最旧的，避免大群/多转发把内存拖大
+    const maxEntries = 200
+    if (this.map.size >= maxEntries) {
       const now = Date.now()
       for (const [k, v] of this.map) if (now > v.expireAt) this.map.delete(k)
+      while (this.map.size >= maxEntries) {
+        const oldest = this.map.keys().next().value
+        if (oldest === undefined) break
+        this.map.delete(oldest)
+      }
     }
     this.map.set(key, { expireAt: Date.now() + this.ttlSeconds * 1000, value })
   }

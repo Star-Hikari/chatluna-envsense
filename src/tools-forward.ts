@@ -49,6 +49,7 @@ export const forwardToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> =
             maxChars: forwardConfig?.maxChars ?? 4000,
             logger: deps.logger,
             cache: deps.cache,
+            limiter: deps.limiter,
           })
           if (!result.ok) {
             deps.logger.debug(`读取聊天记录未成功：${result.error}`)

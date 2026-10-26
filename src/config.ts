@@ -61,6 +61,59 @@ export interface ForwardSenseConfig {
   maxChars: number
 }
 
+/** 自动群打卡 */
+export interface AutoCheckinConfig {
+  /** 是否每天自动打卡 */
+  enabled: boolean
+  /** 自动打卡只处理这些群；留空 = 不自动打卡（与主动工具白名单是两套列表，白名单开启时取交集） */
+  groups: string[]
+  /** 每天触发时间（本地时区 HH:mm） */
+  time: string
+  /** 0..N 分钟随机延迟 */
+  jitterMinutes: number
+  /** 当天错过时，bot 恢复在线后是否补跑 */
+  catchUp: boolean
+  /** 群与群之间的间隔（秒） */
+  intervalSeconds: number
+  /** 单次最多处理多少个群（自动打卡列表超过它时只处理前 N 个） */
+  maxGroups: number
+}
+
+/** 主动工具 · 通用 */
+export interface ActionCommonConfig {
+  /** 是否启用群白名单 */
+  whitelistEnabled: boolean
+  /** 白名单群号；开启白名单且为空 = 全禁 */
+  groups: string[]
+}
+
+/** 主动工具 · 主动点赞 */
+export interface ActionLikeConfig {
+  /** profile_like：给当前发言人/私聊对象点赞 */
+  enabled: boolean
+  /** 每次点赞次数（普通账号 QQ 每好友每天 10 次，SVIP 可到 20 次） */
+  times: number
+  /** 每天最多给多少人点赞（全局，防止多私聊/多群刷） */
+  maxPerDay: number
+}
+
+/** 主动工具 · 群打卡 */
+export interface ActionCheckinConfig {
+  /** group_checkin：bot 以自己在当前群的身份发起群打卡 */
+  enabled: boolean
+  /** 打卡后是否用「今日打卡榜」核对 bot 是否真的签上了 */
+  verify: boolean
+  /** 自动打卡 */
+  auto: AutoCheckinConfig
+}
+
+/** 主动工具（会改变 QQ 侧状态） */
+export interface ActionConfig {
+  common: ActionCommonConfig
+  like: ActionLikeConfig
+  checkin: ActionCheckinConfig
+}
+
 export interface Config {
   /** 是否输出详细日志（工具调用明细、原始返回、取图过程、启动清单等） */
   debug: boolean
@@ -76,6 +129,8 @@ export interface Config {
   forward: ForwardSenseConfig
   group: GroupSenseConfig
   user: UserSenseConfig
+  /** 主动工具（群打卡 / 资料卡点赞），默认全部关闭 */
+  action: ActionConfig
 }
 
 export const Config = Schema.intersect([
@@ -150,4 +205,59 @@ export const Config = Schema.intersect([
       .default({} as UserSenseConfig)
       .description('用户/个人资料感知工具'),
   }),
+
+  // ── 主动工具（默认全部关闭）──
+  // 结构：主动工具 → 通用 / 主动点赞 / 群打卡 → 自动群打卡。
+  // 注意：这里**不能**给 like/checkin/auto 加 .collapse()——控制台会把折叠对象渲染成
+  // "action.like 展开以编辑"这样的字段行，而不是与「通用」同级的大标题。
+  Schema.object({
+    action: Schema.object({
+      common: Schema.object({
+        whitelistEnabled: Schema.boolean().default(false)
+          .description('是否启用主动工具的群白名单：开启后只有列表里的群能使用主动工具；列表为空则全部禁用'),
+        groups: Schema.array(Schema.string()).default([])
+          .description('允许使用主动工具的群号；仅在"启用群白名单"时生效。留空且开启白名单 = 任何群都不能用'),
+      })
+        .default({} as ActionCommonConfig)
+        .description('通用'),
+
+      like: Schema.object({
+        enabled: Schema.boolean().default(false)
+          .description('profile_like：允许模型给当前发言人（私聊即对端）的资料卡点赞（不能指定别人，每人每天一次）'),
+        times: Schema.number().min(1).max(20).default(10)
+          .description('每次点赞点几个（1–20）。QQ 对普通账号的限制是每个好友每天 10 次，SVIP 账号可点 20 次；超过账号实际上限时以 QQ 侧为准'),
+        maxPerDay: Schema.number().min(1).max(200).default(20)
+          .description('每天最多给多少人点赞（全局上限，防止大量私聊/群聊各要一次；与每好友 10 次是两回事）'),
+      })
+        .default({} as ActionLikeConfig)
+        .description('主动点赞'),
+
+      checkin: Schema.object({
+        enabled: Schema.boolean().default(false)
+          .description('group_checkin：允许 bot 在当前群里以自己的身份发起群打卡（只作用于当前群，每个群每天一次；需要 NapCat 开启 PacketBackend）'),
+        verify: Schema.boolean().default(true)
+          .description('打卡后用「今日打卡榜」核对 bot 是否真的签上了：QQ 不返回打卡回执，只有榜单能证明。榜单读不到时按"请求已受理"处理，不会误判失败'),
+        auto: Schema.object({
+          enabled: Schema.boolean().default(false)
+            .description('每天自动打卡（与模型调用共享"当天一次"状态；开启后不需要任何人说话）'),
+          groups: Schema.array(Schema.string()).default([])
+            .description('自动打卡只处理这些群（与主动工具白名单是两套列表；白名单开启时还会取交集）。留空 = 不自动打卡'),
+          time: Schema.string().pattern(/^\d{1,2}:\d{2}$/).default('00:05')
+            .description('每天自动打卡时间（本地时区 HH:mm，建议 00:05 之后）'),
+          jitterMinutes: Schema.number().min(0).max(120).default(10)
+            .description('在目标时间后随机延迟 0..N 分钟，避免所有群/所有 bot 同一秒打卡'),
+          catchUp: Schema.boolean().default(true)
+            .description('当天目标时间已过、但 bot 当时不在线时，恢复连接后补跑一次（仍只算当天一次）'),
+          intervalSeconds: Schema.number().min(1).max(60).default(3)
+            .description('自动打卡时群与群之间的间隔（秒）'),
+          maxGroups: Schema.number().min(1).max(200).default(50)
+            .description('单次自动打卡最多处理多少个群（自动打卡列表超过它时只处理前 N 个）'),
+        })
+          .default({} as AutoCheckinConfig)
+          .description('自动群打卡'),
+      })
+        .default({} as ActionCheckinConfig)
+        .description('群打卡'),
+    }).default({} as ActionConfig),
+  }).description('主动工具'),
 ]) as unknown as Schema<Config>
