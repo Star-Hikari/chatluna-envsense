@@ -2,7 +2,7 @@ import { tool } from '@langchain/core/tools'
 import { z } from 'zod'
 import type { ChatLunaTool } from 'koishi-plugin-chatluna/llm-core/platform/types'
 import { groupAvatarUrls } from './avatar'
-import { buildAvatarObservation, cachedCall, modelImageSupport, onebotAuthorization, PERCEPTION_NOTE, sessionFrom, ToolDeps } from './common'
+import { buildAvatarObservation, cachedCall, modelImageSupport, onebotAuthorization, PERCEPTION_NOTE, sessionFrom, takeImageBudget, ToolDeps } from './common'
 import {
   fmtTs,
   fmtTsRel,
@@ -304,7 +304,7 @@ export const groupToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
             }
             return deps.config.group.noticesIncludeNewMember
               ? `群 ${gid} 当前没有公告（含"发送给新成员"的公告）。`
-              : `群 ${gid} 当前没有公告（已按配置过滤掉"发送给新成员"的公告）。`
+              : `群 ${gid} 当前没有公告（"发送给新成员"那类这次没算进来）。`
           }
 
           // 两段式：默认只给预览清单，模型带 notice_id 再来要某条的完整正文与图片
@@ -329,9 +329,11 @@ export const groupToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
               ctx: deps.ctx,
               logger: deps.logger,
               delivery: deps.config.avatarDelivery,
-              maxBytes: deps.config.avatarMaxKb * 1024,
+              maxBytes: Math.max(64, deps.config.imageMaxKb ?? 512) * 1024,
               maxImages: deps.config.group.noticeImageLimit,
+              maxSide: deps.config.imageMaxSide ?? 1280,
               storage: deps.storage,
+              takeBudget: (bytes) => takeImageBudget(deps, session, bytes).ok,
             },
           })) as unknown as string
         },
@@ -343,7 +345,7 @@ export const groupToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
             '当你想知道群里贴了哪些公告、公告讲了什么时使用。',
             '- group_id：留空就是当前会话所在的群。',
             '- limit：概览最多列几条。',
-            '- notice_id：填上概览里某一条的 id，你就会再一次、更完整地看到那一条——完整的正文，以及它带的图片（需要当前模型支持图片输入）。',
+            '- notice_id：填上概览里某一条的 id，你就会再一次、更完整地看到那一条——完整的正文，以及它带的图片（能看的时候你是真的看到了它们）。',
             '- 概览只是摘录。用户想听完整内容、或问公告里的图是什么时，记得带上 id 再看一次完整版。',
             '- 偶尔会有看不清楚的时候：那就如实说你这次没看到、稍后再看；如果你看到的是"没有公告"，那就是真的没有。',
             `- ${PERCEPTION_NOTE}。`,
@@ -659,7 +661,7 @@ export const groupToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
             '',
             '当有人问"你知道我们群头像是什么吗""评价一下群头像"时使用。',
             '- group_id：留空就是当前会话所在的群。',
-            '- 图片会作为你实际看到的内容交给你：直接讲你看到的样子就好，不要说自己"调用了工具"或"拿到一个链接"。需要当前模型支持图片输入。',
+            '- 图片会真的摆在你眼前：直接讲你看到的样子就好，不要说自己"调用了工具"或"拿到一个链接"；万一这会儿看不了图，就如实说看不了。',
             `- ${PERCEPTION_NOTE}。`,
           ].join('\n'),
           schema: z.object({ group_id: groupIdSchema }),

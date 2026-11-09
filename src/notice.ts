@@ -5,6 +5,7 @@ import {
   deliverImageBytes,
   downloadImageBytes,
   MinimalStorageService,
+  prepareInlineImage,
   sniffImageMime,
 } from './avatar'
 import { fmtTsRel, truncate } from './format'
@@ -99,7 +100,11 @@ export interface NoticeImageContext {
   delivery: AvatarDelivery
   maxBytes: number
   maxImages: number
+  /** 压缩长边（公告截图常有小字，可比默认 1280 再调大） */
+  maxSide?: number
   storage?: MinimalStorageService
+  /** 预算回调：返回 false 表示本会话图片预算已用满（2026-11-02 413 事故后加） */
+  takeBudget?: (bytes: number) => boolean
 }
 
 /**
@@ -204,11 +209,11 @@ export async function renderNoticeDetail(opts: {
   const parts: any[] = []
 
   if (opts.vision === false) {
-    head.push(`本条公告带了 ${pics.length} 张图片，但你现在看不到图（当前模型不支持图片输入），只能读到上面的文字。`)
+    head.push(`本条公告带了 ${pics.length} 张图片，可我这会儿看不了图，只能读到上面的文字。`)
     return head.join('\n')
   }
   if (image.maxImages <= 0) {
-    head.push(`本条公告带了 ${pics.length} 张图片（当前设置下你不去看图）。`)
+    head.push(`本条公告带了 ${pics.length} 张图片，不过我这次没去看它们。`)
     return head.join('\n')
   }
 
@@ -217,8 +222,19 @@ export async function renderNoticeDetail(opts: {
     const res = await resolveNoticeImage(internal, pic, image, i)
     if ('bytes' in res) {
       try {
+        const prepared = await prepareInlineImage(
+          res.bytes,
+          sniffImageMime(res.bytes) ?? 'image/jpeg',
+          image.maxBytes,
+          image.maxSide ?? 1280,
+        )
+        if (image.takeBudget && !image.takeBudget(prepared.bytes.byteLength)) {
+          notes.push(`第 ${i + 1} 张图这次先不展开看了（刚才已经看过不少图）`)
+          continue
+        }
         const delivered = await deliverImageBytes({
-          bytes: res.bytes,
+          bytes: prepared.bytes,
+          mime: prepared.mime,
           baseName: `notice-${notice.notice_id}-${i + 1}`,
           delivery: image.delivery,
           maxBytes: image.maxBytes,

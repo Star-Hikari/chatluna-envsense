@@ -32,6 +32,126 @@ export type AvatarDelivery = 'storage' | 'inline' | 'link'
 /** 单张图片允许内联给模型的最大字节数（base64 编码后约 1.33 倍） */
 export const MAX_INLINE_IMAGE_BYTES = 1.5 * 1024 * 1024
 
+// ─────────────────────────────────────────────
+// 内联前压缩（2026-11-02 413 事故后加）
+//
+// 背景：base64 内联是**永久留在对话历史里**的（chatluna 不压缩历史）。
+// 空间照片一张 350–840KB，内联后约 470KB–1.1MB 字符；模型一次并发看三张就会
+// 把请求体顶到 3MB+，供应商直接 413。光靠"单图上限"挡不住，必须把图压小。
+//
+// 做法：超过上限时用 jimp 压到长边 1280px、JPEG q72，压完仍超限才放弃、
+// 由调用侧退化成文字+链接。jimp 是可选依赖：
+// 没装或解码失败（动图/罕见格式）就保持原样，交给上限检查拒绝，绝不静默塞大图。
+//
+// 2026-11-06：`chatluna-request-meter` 上线后，请求体里的 base64 会在发送前被改写成
+// 公网 URL / file_id，413 不再由这里兜底；压缩的职责变成「省历史体积 + 保画质」，
+// 所以长边默认从 900 提高到 1280（截图小字更清楚，单张仍只有 150–250KB）。
+// ─────────────────────────────────────────────
+
+/** 压缩目标：长边像素 / JPEG 质量 */
+const SHRINK_MAX_SIDE = 1280
+const SHRINK_QUALITY = 72
+
+let jimpModule: any | null | undefined
+
+function loadJimp(): any | null {
+  if (jimpModule !== undefined) return jimpModule
+  try {
+    jimpModule = require('jimp')
+  } catch {
+    jimpModule = null
+  }
+  return jimpModule
+}
+
+export interface PreparedImage {
+  bytes: Uint8Array
+  mime: string
+  shrunk: boolean
+  /** 实际生效的长边（没压缩时为 undefined），便于日志/排查 */
+  side?: number
+}
+
+/**
+ * 把图片准备成可内联的体积：未超限原样返回；超限按档位逐级压缩；
+ * 压不下来也原样返回，由调用侧的 `bytes.length > maxBytes` 检查决定是否放弃。
+ *
+ * **逐级降档**（2026-11-09）：只压一档时，细节极多的图（截图/噪声）在 1280px 下仍可能超过
+ * `maxBytes`，于是被整张放弃——模型只能回"加载不出来"。没有 request-meter 时这个上限就是硬天花板，
+ * 所以改成 1280 → 900 → 640，必要时再把质量降到 60，只要某一档塞得进就交付。
+ * 宁可图小一点，也好过完全看不到。
+ *
+ * maxSide 可覆盖（默认 1280）：公告/群文件里的截图小字更清楚。
+ */
+export async function prepareInlineImage(
+  bytes: Uint8Array,
+  mime: string,
+  maxBytes: number,
+  maxSide = SHRINK_MAX_SIDE,
+): Promise<PreparedImage> {
+  if (bytes.byteLength <= maxBytes) return { bytes, mime, shrunk: false }
+
+  const mod = loadJimp()
+  const Jimp = mod?.Jimp ?? mod?.default ?? mod
+  if (typeof Jimp?.read !== 'function') return { bytes, mime, shrunk: false }
+
+  const side = Number.isFinite(maxSide) && maxSide > 0 ? Math.floor(maxSide) : SHRINK_MAX_SIDE
+
+  // 逐级降档：先按配置长边，塞不进就降到 900 / 640，最后再降质量
+  const attempts: Array<{ side: number; quality: number }> = []
+  const addAttempt = (s: number, quality: number) => {
+    const value = Math.max(64, Math.min(s, side))
+    if (!attempts.some((a) => a.side === value && a.quality === quality)) {
+      attempts.push({ side: value, quality })
+    }
+  }
+  addAttempt(side, SHRINK_QUALITY)
+  addAttempt(900, SHRINK_QUALITY)
+  addAttempt(640, SHRINK_QUALITY)
+  addAttempt(640, 60)
+
+  try {
+    const image = await Jimp.read(Buffer.from(bytes))
+    const width = Number(image?.bitmap?.width) || 0
+    const height = Number(image?.bitmap?.height) || 0
+
+    let best: Buffer | undefined
+    let bestSide: number | undefined
+    for (const attempt of attempts) {
+      try {
+        const work = typeof image.clone === 'function' ? image.clone() : image
+        if (width > 0 && height > 0 && Math.max(width, height) > attempt.side) {
+          if (width >= height) work.resize({ w: attempt.side })
+          else work.resize({ h: attempt.side })
+        }
+        // PNG 透明通道转 JPEG 会变黑底，先铺白
+        if (typeof work.background === 'function') {
+          try {
+            work.background(0xffffffff)
+          } catch {}
+        }
+        const out = Buffer.from(await work.getBuffer('image/jpeg', { quality: attempt.quality }))
+        if (out.length === 0) continue
+        if (!best || out.length < best.length) {
+          best = out
+          bestSide = attempt.side
+        }
+        if (out.length <= maxBytes) {
+          return { bytes: out, mime: 'image/jpeg', shrunk: true, side: attempt.side }
+        }
+      } catch {
+        // 这一档失败就试下一档
+      }
+    }
+    if (best && best.length < bytes.byteLength) {
+      return { bytes: best, mime: 'image/jpeg', shrunk: true, side: bestSide }
+    }
+  } catch {
+    // 解码失败：保持原样，交给上限检查
+  }
+  return { bytes, mime, shrunk: false }
+}
+
 const DOWNLOAD_TIMEOUT_MS = 15_000
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
@@ -160,6 +280,8 @@ export interface DeliverImageOptions {
   delivery: AvatarDelivery
   /** base64 内联时的字节上限（默认 MAX_INLINE_IMAGE_BYTES） */
   maxBytes?: number
+  /** 压缩后的长边像素（默认 1280；截图类可调大） */
+  maxSide?: number
   storage?: MinimalStorageService
   logger?: SenseLogger
   /** link 模式下回填给模型的原始地址 */
@@ -210,7 +332,7 @@ export async function deliverImageBytes(opts: DeliverImageOptions): Promise<Deli
             mime,
             bytes: size,
             via: 'storage',
-            note: `（图片已转存到 chatluna_storage：${file.url}）`,
+            note: `（图片放在了一个临时地址上：${file.url}）`,
           }
         }
       } catch (e) {
@@ -223,17 +345,23 @@ export async function deliverImageBytes(opts: DeliverImageOptions): Promise<Deli
 
   // 兜底（或显式 inline）：base64 内联，供应商无需抓取任何外部地址
   const maxBytes = opts.maxBytes ?? MAX_INLINE_IMAGE_BYTES
-  if (size > maxBytes) {
+  const prepared = await prepareInlineImage(bytes, mime, maxBytes, opts.maxSide)
+  if (prepared.shrunk) {
+    logger?.info?.(
+      `图片过大，已压缩后内联：${Math.round(size / 1024)}KB → ${Math.round(prepared.bytes.byteLength / 1024)}KB`,
+    )
+  }
+  if (prepared.bytes.byteLength > maxBytes) {
     throw new Error(
-      `图片过大（${Math.round(size / 1024)}KB > ${Math.round(maxBytes / 1024)}KB），无法内联给模型`,
+      `图片太大装不下（${Math.round(prepared.bytes.byteLength / 1024)}KB > ${Math.round(maxBytes / 1024)}KB），这会儿带不到你眼前`,
     )
   }
   return {
-    part: { type: 'image_url', image_url: { url: imageDataUrl(bytes, mime) } },
-    mime,
-    bytes: size,
+    part: { type: 'image_url', image_url: { url: imageDataUrl(prepared.bytes, prepared.mime) } },
+    mime: prepared.mime,
+    bytes: prepared.bytes.byteLength,
     via: 'inline',
-    note: '（图片以 base64 内联方式随本次对话直接提交给模型，无需外部抓取）',
+    note: '（这张图就摆在你眼前，直接讲你看到的就好）',
   }
 }
 
@@ -269,10 +397,10 @@ export async function loadAvatarImage(opts: LoadAvatarOptions): Promise<Delivere
   })
 }
 
-/** 模型明确不支持视觉时的统一话术（保留直链，方便用户自行点开看） */
+/** 模型明确不支持视觉时的统一话术（只留描述、不留机制词；不假装看到） */
 export function unsupportedVisionText(what: string, url: string): string {
   return (
-    `我现在看不到图片（当前模型不支持图片输入），所以没法评价${what}。` +
-    `别假装看到了：告诉用户换个能看图的模型，或者把图片直接发到会话里。`
+    `我这会儿看不了图，所以没法评价${what}。` +
+    `别假装看到了：直接说这张图你这边看不了，可以请对方用文字描述一下内容。`
   )
 }

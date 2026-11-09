@@ -24,6 +24,11 @@ export interface ToolDeps {
   limiter: ApiLimiter
   /** 同 key 查询的 in-flight 去重：多个会话同时查同一个群/成员时只发一次请求 */
   inflight: Map<string, Promise<ApiResult<any>>>
+  /**
+   * QQ 空间专用缓存（可选）。空间走的是网页 RPC，比群信息更容易被风控，
+   * 所以给它一条更长的 TTL，不跟全局 cacheTtlSeconds 共用。
+   */
+  qzoneCache?: TtlCache
 }
 
 /** 从 langchain 运行配置取本次会话（chatluna 在 plugin 链里注入 configurable.session，见调研 §7.3） */
@@ -188,4 +193,64 @@ export interface ToolDef {
   name: string
   enabled: boolean
   build: (deps: ToolDeps) => ChatLunaTool
+}
+
+// ─────────────────────────────────────────────
+// 会话级内联图片预算（2026-11-02 413 事故后加）
+//
+// 单张图压小了仍然会被**永久写进对话历史**：一次会话里模型多看几轮图，累计字节一样能把
+// 请求体顶爆（实测 3 条工具结果 = 2.4MB 字符）。所以再加一道"每会话每个时间窗最多内联多少字节"，
+// 超了就退化成文字+链接，等窗口滑过去再恢复。
+//
+// 只统计**内容图**（空间/相册/群文件/公告），头像不计入：头像几十 KB，统计进来只会误伤。
+// ─────────────────────────────────────────────
+
+interface ImageBudgetEntry {
+  at: number
+  bytes: number
+}
+
+const imageBudgets = new Map<string, ImageBudgetEntry>()
+const MAX_BUDGET_ENTRIES = 200
+
+/** 预算归属：按"会话"算，群聊=群、私聊=对端；不同 bot 账号分开 */
+export function imageBudgetKey(session: Session | undefined): string {
+  if (!session) return 'anonymous'
+  const scope = session.isDirect ? `p:${session.userId ?? ''}` : `g:${session.guildId ?? ''}`
+  return `${session.platform ?? ''}:${session.selfId ?? ''}:${scope}`
+}
+
+/**
+ * 尝试从当前会话的图片预算里划走 bytes。
+ * 超预算返回 `{ ok:false, remainingBytes }`，调用侧应放弃这次内联（给文字+链接），
+ * 而不是把图删掉一半——宁可少看一张，也不要把请求体撑爆。
+ */
+export function takeImageBudget(
+  deps: ToolDeps,
+  session: Session | undefined,
+  bytes: number,
+): { ok: true } | { ok: false; remainingBytes: number } {
+  const budgetKb = deps.config.imageBudgetKb ?? 0
+  if (!budgetKb || budgetKb <= 0) return { ok: true }
+
+  const budget = budgetKb * 1024
+  const windowMs = Math.max(60_000, (deps.config.imageWindowMinutes ?? 30) * 60_000)
+  const key = imageBudgetKey(session)
+  const now = Date.now()
+
+  let entry = imageBudgets.get(key)
+  if (!entry || now - entry.at > windowMs) entry = { at: now, bytes: 0 }
+  if (entry.bytes + bytes > budget) {
+    return { ok: false, remainingBytes: Math.max(0, budget - entry.bytes) }
+  }
+  entry.bytes += bytes
+  entry.at = now
+  if (imageBudgets.size >= MAX_BUDGET_ENTRIES) imageBudgets.clear()
+  imageBudgets.set(key, entry)
+  return { ok: true }
+}
+
+/** 供冒烟/排查使用：读当前会话已用字节 */
+export function imageBudgetUsed(session: Session | undefined): number {
+  return imageBudgets.get(imageBudgetKey(session))?.bytes ?? 0
 }

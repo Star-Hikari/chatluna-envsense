@@ -36,6 +36,34 @@ export interface GroupSenseConfig {
   activity: boolean
   /** group_activity 默认拉取消息条数 */
   activityCount: number
+  /** group_files：群文件列表 / 内容读取 */
+  files: boolean
+  /** 只显示文件列表（不下载内容）；关闭后 fileParse 才有意义 */
+  fileListOnly: boolean
+  /** 尝试解析可获取的文件内容交给模型（txt/md/json/csv/docx/pptx/xlsx/图片；pdf 只给链接） */
+  fileParse: boolean
+  /** 单文件下载上限（KB） */
+  fileMaxKb: number
+  /** 单个文件最多输出多少字 */
+  fileTextLimit: number
+  /** group_albums：群相册列表 / 上传批次详情 */
+  albums: boolean
+  /** 一次最多取回几张相册图片 */
+  albumImageLimit: number
+  /** 相册详情调用的会话冷却（秒） */
+  albumCooldownSeconds: number
+  /** 相册概览一次最多列多少个上传批次 */
+  albumBatchLimit: number
+}
+
+/** 聊天上下文（最近消息，群聊/私聊共用） */
+export interface RecentConfig {
+  /** recent_messages：查看当前会话最近的聊天记录 */
+  enabled: boolean
+  /** 默认返回多少条 */
+  count: number
+  /** 单次最多多少条 */
+  max: number
 }
 
 export interface UserSenseConfig {
@@ -45,6 +73,10 @@ export interface UserSenseConfig {
   avatar: boolean
   /** profile_reaction_stats */
   reactionStats: boolean
+  /** friend_overview / friend_search */
+  friends: boolean
+  /** friend_search 默认最多列多少个好友 */
+  friendLimit: number
 }
 
 /** 合并转发（聊天记录）与 chatluna 引用修复 */
@@ -114,6 +146,33 @@ export interface ActionConfig {
   checkin: ActionCheckinConfig
 }
 
+/** QQ 空间感知（只读；这些 action 是 NapCat 4.18.42 才新增的） */
+export interface QzoneSenseConfig {
+  /** qzone_feeds：好友动态 */
+  feeds: boolean
+  /** qzone_posts：某人/自己的说说列表 */
+  posts: boolean
+  /** qzone_post_detail：单条说说的全文与评论 */
+  detail: boolean
+  /** qzone_profile：空间名称与说明 */
+  profile: boolean
+  /** 列表默认返回多少条 */
+  count: number
+  /** 列表单次上限（好友动态受 50 限制、说说列表受 100 限制，插件会再夹一次） */
+  max: number
+  /** 详情默认取多少条评论 */
+  commentCount: number
+  /** 详情默认取几张图（0 = 只看图数，不下载） */
+  imageLimit: number
+  /** 空间查询缓存（秒）。空间走网页接口，TTL 比全局长以降低风控风险 */
+  cacheTtlSeconds: number
+  /**
+   * 最多看多少天前的空间动态/说说（默认 14，0 = 不限制）。
+   * 列表按时间倒序，超过这个天数的条目不再列出，也不再继续往后翻页。
+   */
+  maxAgeDays: number
+}
+
 export interface Config {
   /** 是否输出详细日志（工具调用明细、原始返回、取图过程、启动清单等） */
   debug: boolean
@@ -125,10 +184,22 @@ export interface Config {
   avatarSize: number
   /** base64 内联时允许的单图最大字节数（KB） */
   avatarMaxKb: number
+  /** 内容图（空间/相册/群文件/公告）单张内联上限（KB）：超过会先压缩再内联 */
+  imageMaxKb: number
+  /** 每个会话在 imageWindowMinutes 内最多内联多少图片字节（KB），0 = 不限制 */
+  imageBudgetKb: number
+  /** 内联图片预算的时间窗（分钟） */
+  imageWindowMinutes: number
+  /** 压缩后的长边像素（默认 1280；公告/群文件截图可再调大） */
+  imageMaxSide: number
   /** 合并转发（聊天记录）开关与参数 */
   forward: ForwardSenseConfig
+  /** 最近聊天记录（群聊/私聊共用） */
+  recent: RecentConfig
   group: GroupSenseConfig
   user: UserSenseConfig
+  /** QQ 空间感知（只读；需要 NapCat 4.18.42+） */
+  qzone: QzoneSenseConfig
   /** 主动工具（群打卡 / 资料卡点赞），默认全部关闭 */
   action: ActionConfig
 }
@@ -155,6 +226,14 @@ export const Config = Schema.intersect([
       .description('头像请求的尺寸档位。qlogo 只接受 0/40/100/140/640，其余值会返回 HTTP 400；插件会按 640→140→100→40→0 自动兜底'),
     avatarMaxKb: Schema.number().min(64).max(2048).default(1536)
       .description('base64 内联时单张图片的字节上限（KB）：超过则放弃内联并告知模型取图失败'),
+    imageMaxKb: Schema.number().min(64).max(4096).default(512)
+      .description('空间/相册/群文件/公告里的内容图，单张内联上限（KB）。超过上限会先压到 imageMaxSide、JPEG 质量 72 再内联；压完仍超限就只给文字与链接。装了 chatluna-request-meter 后请求体由它在发送前改写，这里主要影响对话历史体积与画质'),
+    imageBudgetKb: Schema.number().min(0).max(16384).default(2048)
+      .description('每个会话在一个时间窗内最多内联多少内容图（KB）。超了就只给文字与链接，等窗口滑过去再恢复。0 = 不限制（不建议）'),
+    imageWindowMinutes: Schema.number().min(1).max(1440).default(30)
+      .description('上面那个图片预算的时间窗（分钟）'),
+    imageMaxSide: Schema.number().min(512).max(2048).default(1280)
+      .description('压缩时的长边像素。默认 1280：照片够清晰，公告/群文件里的截图小字也基本能看清；看不清可以调到 1600–2048（单张体积会相应变大）'),
 
     // ── 合并转发（聊天记录）──
     // 放在「通用」末尾：前两项是与 chatluna 行为相关的开关，后三项是读取时的限额。
@@ -190,9 +269,32 @@ export const Config = Schema.intersect([
       avatar: Schema.boolean().default(true).description('group_avatar：让模型看见群头像（需主模型支持图片输入）'),
       activity: Schema.boolean().default(false).description('group_activity：近期发言活跃度统计（拉历史消息，较重，默认关闭）'),
       activityCount: Schema.number().min(50).max(500).default(200).description('活跃度统计默认拉取的消息条数'),
+      files: Schema.boolean().default(true).description('group_files：群文件列表与（可选）文件内容读取'),
+      fileListOnly: Schema.boolean().default(true).description('只显示文件列表（文件名/大小/上传者/时间），不下载内容。关闭它才会启用下面的「尝试解析文件」'),
+      fileParse: Schema.boolean().default(false).description('尝试解析可获取的文件内容交给模型（txt/md/json/csv/docx/pptx/xlsx/图片；pdf 只给下载链接）。仅在关闭「只显示文件列表」后生效；无论是否开启，都要先看文件列表拿到 file_id 才能读取'),
+      fileMaxKb: Schema.number().min(64).max(51200).default(8192).description('单个群文件允许下载的最大体积（KB），超过只给元数据与下载链接'),
+      fileTextLimit: Schema.number().min(500).max(100000).default(20000).description('单个文件最多交给模型多少字（超出截断并注明）'),
+      albums: Schema.boolean().default(true).description('group_albums：群相册列表与上传批次详情（含图片）'),
+      albumImageLimit: Schema.number().min(0).max(9).default(3).description('查看某次上传详情时，一次最多取回几张图片交给模型（0 = 只看文字说明）'),
+      albumCooldownSeconds: Schema.number().min(0).max(300).default(10).description('相册详情两次调用之间的会话冷却（秒），防止模型连着刷图'),
+      albumBatchLimit: Schema.number().min(1).max(100).default(20).description('相册概览一次最多列多少个上传批次'),
     })
       .default({} as GroupSenseConfig)
       .description('群聊环境感知工具'),
+  }),
+
+  // ── 聊天上下文（最近消息，群聊/私聊共用）──
+  Schema.object({
+    recent: Schema.object({
+      enabled: Schema.boolean().default(true)
+        .description('recent_messages：查看当前会话最近的聊天记录（群聊看当前群、私聊看当前对端；包括没有触发 bot 的消息）'),
+      count: Schema.number().min(1).max(100).default(30)
+        .description('默认返回多少条'),
+      max: Schema.number().min(1).max(100).default(100)
+        .description('单次最多多少条（模型可以要求更少，但不能超过这个数）'),
+    })
+      .default({} as RecentConfig)
+      .description('聊天上下文'),
   }),
 
   // ── 用户感知 ──
@@ -201,9 +303,41 @@ export const Config = Schema.intersect([
       profile: Schema.boolean().default(true).description('user_profile：查询任意 QQ 的资料卡（昵称/签名/等级/注册时间/VIP 等，取决于对方公开程度）'),
       avatar: Schema.boolean().default(true).description('user_avatar：让模型看见某人的 QQ 头像（需主模型支持图片输入）'),
       reactionStats: Schema.boolean().default(true).description('profile_reaction_stats：查询自己或他人资料卡的互动数据（总计/今日新增/最近互动的人）'),
+      friends: Schema.boolean().default(true).description('friend_overview / friend_search：好友总数、分组、单向好友，以及判断某人是不是好友（只读，不含任何写操作）'),
+      friendLimit: Schema.number().min(1).max(100).default(10).description('friend_search 一次最多列多少个匹配的好友'),
     })
       .default({} as UserSenseConfig)
       .description('用户/个人资料感知工具'),
+  }),
+
+  // ── QQ 空间感知（只读；需要 NapCat ≥ 4.18.42）──
+  // 这些 action（get_qzone_*）是 NapCat 4.18.42 才新增的，旧版本会返回"不支持的 API"。
+  // 走的都是空间网页接口：只读、不落库、缓存 TTL 比全局长。
+  Schema.object({
+    qzone: Schema.object({
+      feeds: Schema.boolean().default(true)
+        .description('qzone_feeds：看朋友们最近的空间动态（只读，带序号，可往前翻）'),
+      posts: Schema.boolean().default(true)
+        .description('qzone_posts：看某人（或自己）发过的说说列表（只读，带序号）'),
+      detail: Schema.boolean().default(true)
+        .description('qzone_post_detail：打开某条说说的全文与评论（只读）'),
+      profile: Schema.boolean().default(true)
+        .description('qzone_profile：看某个空间的名字与说明（只读）'),
+      count: Schema.number().min(1).max(50).default(8)
+        .description('列表工具默认返回多少条'),
+      max: Schema.number().min(1).max(100).default(20)
+        .description('列表工具单次最多返回多少条（好友动态实际最多 50、说说列表最多 100，插件会再夹一次）'),
+      commentCount: Schema.number().min(1).max(50).default(20)
+        .description('打开说说详情时默认取多少条评论'),
+      imageLimit: Schema.number().min(0).max(4).default(0)
+        .description('打开说说详情时默认取几张图（0 = 只看图数、不下载；非 0 需要主模型支持图片输入）'),
+      cacheTtlSeconds: Schema.number().min(0).max(3600).default(180)
+        .description('空间查询结果的缓存时间（秒）。空间走网页接口，缓存长一点能明显减少被风控的机会；0 = 每次都实查'),
+      maxAgeDays: Schema.number().min(0).max(3650).default(14)
+        .description('最多看多少天前的空间动态/说说（默认 14 天，0 = 不限制）。好友动态和说说列表都按时间倒序，超过这个天数的条目不再列出，也不再继续往后翻页'),
+    })
+      .default({} as QzoneSenseConfig)
+      .description('QQ 空间感知工具（需要 NapCat 4.18.42 及以上）'),
   }),
 
   // ── 主动工具（默认全部关闭）──

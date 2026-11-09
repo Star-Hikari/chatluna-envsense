@@ -11,6 +11,11 @@ import { MinimalStorageService } from './avatar'
 import { groupToolDefs } from './tools-group'
 import { userToolDefs } from './tools-user'
 import { forwardToolDefs, registerQuoteForwardFix } from './tools-forward'
+import { recentToolDefs } from './recent'
+import { friendToolDefs } from './friends'
+import { fileToolDefs } from './files'
+import { albumToolDefs } from './albums'
+import { qzoneToolDefs } from './qzone'
 import { ActionState } from './action-state'
 import { ActionRuntime } from './actions'
 import { startAutoCheckin } from './auto-checkin'
@@ -36,6 +41,11 @@ export { startAutoCheckin } from './auto-checkin'
 export { ActionRuntime, resolveAutoGroups, runAutoCheckin } from './actions'
 export { ActionState } from './action-state'
 export { createApiLimiter } from './napi'
+// 新版工具的纯函数也导出：冒烟测试直接验证"会话 → 群/私聊分支"与 OOXML 文本提取
+export { resolveRecentTarget } from './recent'
+export { extractDocxText, extractPptxText, extractXlsxText } from './ooxml'
+// 图片压缩也可单独验证：冒烟要确认「超过单图上限时会继续降档，而不是直接放弃」
+export { prepareInlineImage } from './avatar'
 
 // 控制台「使用说明」页。控制台用 k-markdown 的 unsafe 模式渲染 usage，可内嵌 <style>。
 // 只放简介：具体工具、配置项、投递方式都不在这里展开（配置页自己会渲染，README 里有完整说明）。
@@ -50,7 +60,7 @@ export const usage = `
 
 <div class="envsense-usage">
 
-<p><strong>ChatLuna 环境感知扩展</strong>：为 Agent（plugin 模式）提供一组<strong>环境感知工具</strong>，让模型按需了解自己所在的群、群成员、群公告、群荣誉 / 精华 / 打卡，以及某个 QQ 的资料卡、头像与获赞情况。</p>
+<p><strong>ChatLuna 环境感知扩展</strong>：为 Agent（plugin 模式）提供一组<strong>环境感知工具</strong>，让模型按需了解自己所在的群、群成员、群公告、群荣誉 / 精华 / 打卡，以及某个 QQ 的资料卡、头像与获赞情况；还能翻朋友们的空间动态、看看谁发过什么说说。</p>
 
 <p>查询工具<strong>只读</strong>，平时<strong>不注入任何提示词</strong>：不看就不花 token。另有默认关闭的<strong>主动工具</strong>（当前群打卡、给当前发言人/私聊对象点赞），只作用于当前会话环境，并受白名单与"每天一次"约束。全部仅 <strong>NapCat（onebot）</strong> 生效。</p>
 
@@ -83,6 +93,9 @@ export function apply(ctx: Context, config: Config) {
   // 只读查询的并发闸门 + 同 key in-flight 去重：多会话同时查 NapCat 时不会无限并发/重复请求
   const apiLimiter = createApiLimiter(4)
   const inflight = new Map<string, Promise<any>>()
+  // QQ 空间单独一条缓存：空间走网页 RPC，比群信息更容易触发风控，
+  // 所以 TTL 由 qzone.cacheTtlSeconds 单独控制，不跟全局 cacheTtlSeconds 共用。
+  const qzoneCache = new TtlCache(config.qzone?.cacheTtlSeconds ?? 180)
   // 只有真的开了主动能力才建表/注入 database，默认配置下不碰数据库
   if (config.action.checkin.enabled || config.action.like.enabled || config.action.checkin.auto.enabled) {
     ctx.inject(['database'], (ctx) => {
@@ -158,12 +171,15 @@ export function apply(ctx: Context, config: Config) {
       storage: toolDeps.storage,
       limiter: apiLimiter,
       inflight,
+      qzoneCache,
     }
 
     const g = config.group
     const u = config.user
     const f = config.forward
     const a = config.action
+    const r = config.recent
+    const q = config.qzone
     const enabledMap: Record<string, boolean> = {
       // 群域
       group_overview: g.overview,
@@ -175,10 +191,21 @@ export function apply(ctx: Context, config: Config) {
       group_essence: g.essence,
       group_signed: g.signed,
       group_avatar: g.avatar,
+      group_files: g.files,
+      group_albums: g.albums,
+      // 聊天上下文（群聊/私聊共用）
+      recent_messages: r.enabled,
       // 用户域
       user_profile: u.profile,
       user_avatar: u.avatar,
       profile_reaction_stats: u.reactionStats,
+      friend_overview: u.friends,
+      friend_search: u.friends,
+      // QQ 空间（只读；需要 NapCat 4.18.42+）
+      qzone_feeds: q.feeds,
+      qzone_posts: q.posts,
+      qzone_post_detail: q.detail,
+      qzone_profile: q.profile,
       // 合并转发
       read_forward_msg: f.tool,
       // 主动工具（会改变 QQ 侧状态，默认关闭）
@@ -190,6 +217,11 @@ export function apply(ctx: Context, config: Config) {
       ...groupToolDefs,
       ...userToolDefs,
       ...forwardToolDefs,
+      ...recentToolDefs,
+      ...friendToolDefs,
+      ...fileToolDefs,
+      ...albumToolDefs,
+      ...qzoneToolDefs,
       ...makeActionToolDefs(actionRuntime),
     }
 

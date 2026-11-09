@@ -137,7 +137,7 @@ export const userToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
             '',
             '当有人问"你看到我的头像是什么""评价一下 XX 的头像"时使用。',
             '- user_id：要看的 QQ 号；留空就是此刻正在跟你说话的人。',
-            '- 图片会作为你实际看到的内容交给你：直接讲你看到的样子就好，不要说自己"调用了工具"或"拿到一个链接"。需要当前模型支持图片输入。',
+            '- 图片会真的摆在你眼前：直接讲你看到的样子就好，不要说自己"调用了工具"或"拿到一个链接"；万一这会儿看不了图，就如实说看不了。',
             `- ${PERCEPTION_NOTE}。`,
           ].join('\n'),
           schema: z.object({ user_id: userIdSchema }),

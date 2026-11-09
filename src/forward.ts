@@ -274,8 +274,8 @@ const SEG_MARK: Record<string, string> = {
   gift: '礼物',
 }
 
-/** 段数组 → 一行正文（node/forward/reply 由调用侧单独处理） */
-function renderSegments(segments: ForwardSegment[]): string {
+/** 段数组 → 一行正文（node/forward/reply 由调用侧单独处理）；recent_messages 也复用它 */
+export function renderSegments(segments: ForwardSegment[]): string {
   let out = ''
   const push = (text: string, spaced = false) => {
     if (!text) return

@@ -24,6 +24,18 @@ export interface OneBotInternal {
   getGroupSignedList(group_id: string | number): Promise<NapSignedItem[]>
   getEssenceMsgList(group_id: string | number): Promise<NapEssenceItem[]>
   getStrangerInfo(user_id: string | number, no_cache?: boolean): Promise<NapStrangerInfo>
+  /** 好友列表（action: get_friend_list）；adapter 已包装 */
+  getFriendList(no_cache?: boolean): Promise<OnebotFriend[]>
+  /** 单向好友（action: get_unidirectional_friend_list） */
+  getUnidirectionalFriendList(): Promise<OnebotUnidirectionalFriend[]>
+  /** 群文件系统信息（action: get_group_file_system_info） */
+  getGroupFileSystemInfo(group_id: string | number): Promise<NapGroupFileSystemInfo>
+  /** 群根目录文件列表（action: get_group_root_files） */
+  getGroupRootFiles(group_id: string | number): Promise<NapGroupFileList>
+  /** 群文件夹文件列表（action: get_group_files_by_folder） */
+  getGroupFilesByFolder(group_id: string | number, folder_id: string): Promise<NapGroupFileList>
+  /** 群文件下载链接（action: get_group_file_url；adapter 已 extract 成 url 字符串） */
+  getGroupFileUrl(group_id: string | number, file_id: string, busid?: number): Promise<string>
   /**
    * 合并转发记录内容（action: get_forward_msg）。
    * adapter 用 defineExtract('get_forward_msg', 'messages', 'message_id') 包装，
@@ -198,9 +210,137 @@ export interface NapStrangerInfo {
 
 export interface NapMsgRecord {
   time?: number
+  message_seq?: number | string
+  message_id?: number | string
   sender?: { user_id?: number; nickname?: string; card?: string }
   message?: unknown
   raw_message?: string
+}
+
+// ── 好友（get_friend_list / get_friends_with_category / get_unidirectional_friend_list）──
+
+/** 好友项（NapCat 的 OB11User：只声明会用到的字段，手机号/邮箱等敏感字段不读） */
+export interface OnebotFriend {
+  user_id: number
+  nickname?: string
+  remark?: string
+  sex?: string
+  age?: number
+  level?: number
+  qid?: string
+  login_days?: number
+  categoryId?: number
+  category_id?: number
+  categoryName?: string
+}
+
+/** 好友分组（get_friends_with_category） */
+export interface OnebotFriendCategory {
+  categoryId: number
+  categoryName: string
+  categoryMbCount: number
+  onlineCount?: number
+  buddyList: OnebotFriend[]
+}
+
+/** 单向好友（对方加了我、我没加对方） */
+export interface OnebotUnidirectionalFriend {
+  uin?: number
+  uid?: string
+  nick_name?: string
+  age?: number
+  source?: string
+}
+
+// ── 群文件（get_group_root_files / get_group_files_by_folder）──
+
+export interface NapGroupFile {
+  group_id?: number
+  /** 传给 get_group_file_url 的原样 ID（不要改写） */
+  file_id: string
+  file_name: string
+  busid?: number
+  size?: number
+  file_size?: number
+  upload_time?: number
+  dead_time?: number
+  modify_time?: number
+  download_times?: number
+  uploader?: number
+  uploader_name?: string
+}
+
+export interface NapGroupFolder {
+  group_id?: number
+  folder_id: string
+  folder?: string
+  folder_name: string
+  create_time?: number
+  creator?: number
+  creator_name?: string
+  total_file_count?: number
+  modify_time?: number
+  modifier?: number
+  modifier_name?: string
+}
+
+export interface NapGroupFileList {
+  files: NapGroupFile[]
+  folders: NapGroupFolder[]
+}
+
+export interface NapGroupFileSystemInfo {
+  file_count: number
+  limit_count: number
+  used_space: number
+  total_space: number
+}
+
+// ── 群相册（get_qun_album_list / get_group_album_media_list）──
+//
+// 这两个 action 的返回来自 NTQQ album service，字段没有公开类型；下面只列"常见字段"，
+// 其余通过索引签名兜住，调用侧必须做容错（见 albums.ts 的 normalize*）。
+
+export interface NapAlbumItem {
+  album_id?: string
+  albumId?: string
+  album_name?: string
+  albumName?: string
+  cover_url?: string
+  coverUrl?: string
+  create_time?: number
+  createTime?: number
+  upload_count?: number
+  photo_count?: number
+  media_count?: number
+  [key: string]: unknown
+}
+
+export interface NapAlbumMedia {
+  lloc?: string
+  media_id?: string
+  mediaId?: string
+  batch_id?: string
+  batchId?: string
+  upload_time?: number
+  uploadTime?: number
+  uploader?: number | string
+  uploader_name?: string
+  uploaderName?: string
+  desc?: string
+  content?: string
+  text?: string
+  url?: string
+  photo_url?: string
+  pic_url?: string
+  raw_url?: string
+  width?: number
+  height?: number
+  comment_count?: number
+  commentCount?: number
+  comments?: unknown
+  comment_list?: unknown
+  [key: string]: unknown
 }
 
 export interface NapProfileReactionEntry {
@@ -222,6 +362,84 @@ export interface NapProfileReactionResult {
     total_count?: number
     new_count?: number
   }
+}
+
+// ── QQ 空间（NapCat ≥ 4.18.42）──
+//
+// 依据：.memory/napcat-4.18.42-qzone-survey.md（从 NapCat 4.18.42 bundle 提取的 action schema）。
+// 这些 action 是 4.18.42 才新增的，且**没有被 adapter-onebot define() 包装**，
+// 所以只能走 _get/_request；本插件统一用 rawRequest（保留 NapCat 的业务错误文案）。
+//
+// 只声明用到的字段：NapCat 的返回值远多于这里，且不同 QQ 版本会有出入。
+
+/** get_qzone_feeds 的 snowluma 列表项（默认格式） */
+export interface NapQzoneFeedItem {
+  uin?: number
+  nickname?: string
+  time?: number
+  appid?: number
+  key?: string
+  /** H5 原始片段（带标签），content 缺失时才用 */
+  html?: string
+  tid?: string | null
+  content?: string | null
+  content_complete?: boolean | null
+  images?: string[] | null
+  like_count?: number | null
+  comment_count?: number | null
+}
+
+export interface NapQzoneFeedsResult {
+  feeds?: NapQzoneFeedItem[]
+  has_more?: boolean
+  next_cursor?: string | null
+}
+
+/** get_qzone_msg_list 的 snowluma 列表项 */
+export interface NapQzoneMsgItem {
+  tid?: string
+  content?: string
+  time?: number
+  comment_num?: number
+  is_private?: boolean
+  images?: string[]
+}
+
+export interface NapQzoneMsgListResult {
+  total?: number
+  total_known?: boolean
+  msglist?: NapQzoneMsgItem[]
+}
+
+export interface NapQzoneCommentReply {
+  uin?: number
+  name?: string
+  time?: number
+  content?: string
+  comment_id?: string
+}
+
+export interface NapQzoneDetailComment {
+  uin?: number
+  name?: string
+  time?: number
+  content?: string
+  comment_id?: string
+  replies?: NapQzoneCommentReply[]
+}
+
+/** get_qzone_msg_detail 的 snowluma 返回 */
+export interface NapQzoneDetail {
+  tid?: string
+  content?: string
+  comment_num?: number
+  comments?: NapQzoneDetailComment[]
+}
+
+/** get_qzone_profile 返回 */
+export interface NapQzoneProfile {
+  name?: string
+  description?: string
 }
 
 // ── 会话路由解析 ──

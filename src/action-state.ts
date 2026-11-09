@@ -119,7 +119,7 @@ export class ActionState {
     this.cleanupTimer = ctx.setInterval(() => {
       void this.cleanup()
     }, 12 * 60 * 60 * 1000)
-    this.logger.info('主动工具状态已接入 database（同一天内重启也不会重复执行）')
+    this.logger.info('主动工具状态已接入 database')
   }
 
   async get(key: string): Promise<ActionRecord | undefined> {
