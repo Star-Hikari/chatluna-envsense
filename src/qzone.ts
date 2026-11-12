@@ -558,7 +558,7 @@ export const qzoneToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
             return '要看哪一条呢？可以先看朋友们的动态或者某人的说说列表，再用列表里的编号让我打开。'
           }
 
-          const wantComments = clampCount(input.comments ?? cfg.commentCount, cfg.commentCount, 50)
+          const wantComments = clampCount(input.comments ?? cfg.detailOptions?.commentCount ?? 20, cfg.detailOptions?.commentCount ?? 20, 50)
           const res = await qzoneCall<NapQzoneDetail>({
             deps,
             session,
@@ -591,7 +591,7 @@ export const qzoneToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
           const totalComments = countOf(detail.comment_num) ?? cached?.commentCount
           const comments = Array.isArray(detail.comments) ? detail.comments : []
           const imageUrls = cached?.imageUrls ?? []
-          const wantImages = Math.max(0, Math.min(Math.floor(input.images ?? cfg.imageLimit ?? 0), 4))
+          const wantImages = Math.max(0, Math.min(Math.floor(input.images ?? cfg.detailOptions?.imageLimit ?? 0), 4))
 
           const meta = [
             imageUrls.length > 0 ? `${imageUrls.length} 张图` : '',

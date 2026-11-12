@@ -293,14 +293,14 @@ export const albumToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
 
             // 冷却只拦"真的要看图"的重复调用；编号写错不消耗冷却
             const key = `${session?.platform ?? 'onebot'}:${session?.selfId ?? ''}:${gid}:${selected.id}`
-            const left = cooldownLeft(key, cfg.albumCooldownSeconds || 0)
+            const left = cooldownLeft(key, cfg.albumOptions?.cooldownSeconds ?? 10)
             if (left > 0) {
               return `这批相册的详情我刚刚才翻过一遍，等 ${left} 秒才能再看（翻太快我会看不过来）。`
             }
             lastDetailAt.set(key, Date.now())
             if (lastDetailAt.size > 500) lastDetailAt.clear()
 
-            const want = pickImages(input.images ?? cfg.albumImageLimit ?? 3, cfg.albumImageLimit ?? 3)
+            const want = pickImages(input.images ?? cfg.albumOptions?.imageLimit ?? 3, cfg.albumOptions?.imageLimit ?? 3)
             const offset = Math.max(0, Math.min(Math.floor(input.offset ?? 0), batch.items.length))
             const slice = batch.items.slice(offset, offset + want)
             // 2026-11-02：相册曾经也按 4MB 内联，和空间一样会把历史撑爆。
@@ -379,7 +379,7 @@ export const albumToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
           }
 
           // ── 上传批次概览 ──
-          const limit = Math.max(1, Math.min(cfg.albumBatchLimit || 20, 100))
+          const limit = Math.max(1, Math.min(cfg.albumOptions?.batchLimit ?? 20, 100))
           const show = batches.slice(0, limit)
           const lines = [
             `《${truncate(selected.name, 30)}》这一页有 ${batches.length} 个上传批次（新的在前，显示前 ${show.length} 个）：`,

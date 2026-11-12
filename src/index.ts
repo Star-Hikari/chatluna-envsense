@@ -4,6 +4,7 @@ import type { Notifier } from '@koishijs/plugin-notifier' // 类型增强：ctx.
 import 'koishi-plugin-chatluna' // 确保 Context.chatluna 类型扩展被加载
 import { createLogger } from 'koishi-plugin-chatluna/utils/logger'
 import { Config } from './config'
+import { migrateLegacyConfig } from './migrate'
 import { ToolDeps } from './common'
 import { createSenseLogger } from './log'
 import { createApiLimiter, TtlCache } from './napi'
@@ -46,6 +47,8 @@ export { resolveRecentTarget } from './recent'
 export { extractDocxText, extractPptxText, extractXlsxText } from './ooxml'
 // 图片压缩也可单独验证：冒烟要确认「超过单图上限时会继续降档，而不是直接放弃」
 export { prepareInlineImage } from './avatar'
+// 旧配置迁移是纯函数：冒烟直接验证「已手工迁移的 tools 不会被旧布尔覆盖」
+export { migrateLegacyConfig } from './migrate'
 
 // 控制台「使用说明」页。控制台用 k-markdown 的 unsafe 模式渲染 usage，可内嵌 <style>。
 // 只放简介：具体工具、配置项、投递方式都不在这里展开（配置页自己会渲染，README 里有完整说明）。
@@ -83,6 +86,16 @@ function briefList(names: string[], max = 5): string {
 
 export function apply(ctx: Context, config: Config) {
   const logger = createLogger(ctx, 'chatluna-envsense')
+  // 旧版配置迁移：1.4.2 改了配置结构（布尔开关 → 复选框 + xxxOptions 子块）。
+  // schemastery 会把旧键原样透传，这里就地折算成新结构并删掉旧键，避免"改过的设置被静默丢弃"。
+  const migration = migrateLegacyConfig(config)
+  if (migration.found.length > 0) {
+    logger.warn(
+      `检测到旧版配置项（${migration.found.join('、')}），已自动换算成新结构。` +
+        '建议在控制台里确认一遍并保存一次，让配置文件只保留新键。',
+    )
+  }
+  config = migration.config
   // 详细日志门面：debug 关闭时 info/debug 静默，只留 warn/error（报错类）
   const slog = createSenseLogger(logger, () => config.debug === true)
 
@@ -180,32 +193,36 @@ export function apply(ctx: Context, config: Config) {
     const a = config.action
     const r = config.recent
     const q = config.qzone
+    // 工具开关改成复选框（数组）：这里统一转成 Set，缺省/空数组都不会抛错
+    const gTools = new Set(Array.isArray(g?.tools) ? g.tools : [])
+    const uTools = new Set(Array.isArray(u?.tools) ? u.tools : [])
+    const qTools = new Set(Array.isArray(q?.tools) ? q.tools : [])
     const enabledMap: Record<string, boolean> = {
       // 群域
-      group_overview: g.overview,
-      group_members: g.members,
-      member_detail: g.memberDetail,
-      group_notices: g.notices,
-      group_honors: g.honors,
-      group_activity: g.activity,
-      group_essence: g.essence,
-      group_signed: g.signed,
-      group_avatar: g.avatar,
-      group_files: g.files,
-      group_albums: g.albums,
+      group_overview: gTools.has('overview'),
+      group_members: gTools.has('members'),
+      member_detail: gTools.has('memberDetail'),
+      group_notices: gTools.has('notices'),
+      group_honors: gTools.has('honors'),
+      group_activity: gTools.has('activity'),
+      group_essence: gTools.has('essence'),
+      group_signed: gTools.has('signed'),
+      group_avatar: gTools.has('avatar'),
+      group_files: gTools.has('files'),
+      group_albums: gTools.has('albums'),
       // 聊天上下文（群聊/私聊共用）
       recent_messages: r.enabled,
       // 用户域
-      user_profile: u.profile,
-      user_avatar: u.avatar,
-      profile_reaction_stats: u.reactionStats,
-      friend_overview: u.friends,
-      friend_search: u.friends,
+      user_profile: uTools.has('profile'),
+      user_avatar: uTools.has('avatar'),
+      profile_reaction_stats: uTools.has('reactionStats'),
+      friend_overview: uTools.has('friends'),
+      friend_search: uTools.has('friends'),
       // QQ 空间（只读；需要 NapCat 4.18.42+）
-      qzone_feeds: q.feeds,
-      qzone_posts: q.posts,
-      qzone_post_detail: q.detail,
-      qzone_profile: q.profile,
+      qzone_feeds: qTools.has('feeds'),
+      qzone_posts: qTools.has('posts'),
+      qzone_post_detail: qTools.has('detail'),
+      qzone_profile: qTools.has('profile'),
       // 合并转发
       read_forward_msg: f.tool,
       // 主动工具（会改变 QQ 侧状态，默认关闭）

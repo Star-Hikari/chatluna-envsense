@@ -178,7 +178,7 @@ export const friendToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = 
             return `你的 ${list.length} 个好友里没有匹配「${truncate(keyword, 30)}」的。`
           }
 
-          const max = Math.max(1, Math.min(deps.config.user.friendLimit || 10, 100))
+          const max = Math.max(1, Math.min(deps.config.user.friendOptions?.limit ?? 10, 100))
           const want = Math.floor(input.limit ?? max)
           const limit = Math.max(1, Math.min(Number.isFinite(want) ? want : max, max))
           const show = matched.slice(0, limit)

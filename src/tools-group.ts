@@ -156,7 +156,7 @@ export const groupToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
             )
           }
           if (input.role) members = members.filter((m) => m.role === input.role)
-          const maxLimit = deps.config.group.memberLimit
+          const maxLimit = deps.config.group.memberOptions?.limit ?? 50
           const limit = Math.min(input.limit ?? maxLimit, maxLimit, 200)
           if (members.length === 0) {
             return `群 ${gid}（共 ${total} 人）中没有匹配「${input.keyword ?? input.role ?? ''}」的成员。`
@@ -290,7 +290,7 @@ export const groupToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
             )
           }
           let notices = unwrapped.list
-          if (!deps.config.group.noticesIncludeNewMember) {
+          if (!(deps.config.group.noticeOptions?.includeNewMember ?? true)) {
             notices = notices.filter((n) => !n.send_to_new_member)
           }
           if (notices.length === 0) {
@@ -302,7 +302,7 @@ export const groupToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
                   '多半是 NapCat 版本较旧：它只读 feeds、不读 inst，请升级 NapCat 后重试。',
               )
             }
-            return deps.config.group.noticesIncludeNewMember
+            return deps.config.group.noticeOptions?.includeNewMember ?? true
               ? `群 ${gid} 当前没有公告（含"发送给新成员"的公告）。`
               : `群 ${gid} 当前没有公告（"发送给新成员"那类这次没算进来）。`
           }
@@ -330,7 +330,7 @@ export const groupToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
               logger: deps.logger,
               delivery: deps.config.avatarDelivery,
               maxBytes: Math.max(64, deps.config.imageMaxKb ?? 512) * 1024,
-              maxImages: deps.config.group.noticeImageLimit,
+              maxImages: deps.config.group.noticeOptions?.imageLimit ?? 3,
               maxSide: deps.config.imageMaxSide ?? 1280,
               storage: deps.storage,
               takeBudget: (bytes) => takeImageBudget(deps, session, bytes).ok,
@@ -448,9 +448,10 @@ export const groupToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
           entry(h.emotion_list, '快乐源泉', true)
           entry(h.strong_newbie_list, '冒尖小春笋')
           if (lines.length === 1) {
-            // 读不到荣誉榜时给一条可行的替代路径（只有活跃度统计开着时才提，免得模型白跑一趟）
+            // 读不到荣誉榜时给一条可行的替代路径（只有活跃度统计被勾选时才提，免得模型白跑一趟）
+            const activityEnabled = (deps.config.group.tools ?? []).includes('activity')
             const fallback =
-              deps.config.group.activity !== false
+              activityEnabled
                 ? '想知道谁最活跃，可以改用 group_activity 按最近的聊天记录统计。'
                 : ''
             return (
@@ -469,7 +470,7 @@ export const groupToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
             '- group_id：留空就是当前会话所在的群。',
             '- 它比一条条翻聊天记录省事得多，随口问"谁最活跃"时先用它。',
             '- 这一页偶尔会读不到（QQ 侧的荣誉榜页面时好时坏）。真的没读到就如实说这次没看到，别说成"群里没有活跃的人"。',
-            ...(deps.config.group.activity !== false
+            ...( (deps.config.group.tools ?? []).includes('activity')
               ? ['- 读不到时，想知道谁最活跃可以改用 group_activity 从最近的聊天记录里统计。']
               : []),
             `- ${PERCEPTION_NOTE}。`,
@@ -491,7 +492,7 @@ export const groupToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
           const session = sessionFrom(runConfig)
           const gid = resolveGroupId(session, input.group_id)
           if (!gid) return '当前不在群聊中，且未提供 group_id。'
-          const count = Math.min(input.count ?? deps.config.group.activityCount, 500)
+          const count = Math.min(input.count ?? deps.config.group.activityOptions?.count ?? 200, 500)
           const res = await cachedCall<{ messages?: NapMsgRecord[] }>({
             deps,
             key: `activity:${gid}:${count}`,

@@ -41,15 +41,31 @@ plugins:
     avatarDelivery: inline  # inline 最稳；storage 需要公网 serverPath
     imageMaxSide: 1280      # 图片压缩长边
     group:
-      memberLimit: 100
-      fileParse: false      # 默认只列群文件，不开解析
-      albums: true
-    recent:
-      enabled: true
-      count: 30
+      tools:                # 勾选启用的群聊工具（复选框）
+        - overview
+        - members
+        - memberDetail
+        - notices
+        - honors
+        - essence
+        - signed
+        - avatar
+        - files
+        - albums
+      memberOptions:
+        limit: 100          # 成员列表单次最多输出行数
+      fileOptions:
+        listOnly: true      # 默认只列群文件，不开解析
+        parse: false
+    user:
+      tools: [profile, avatar, reactionStats, friends]
+      friendOptions:
+        limit: 5
     qzone:
+      tools: [feeds, posts, detail, profile]
       maxAgeDays: 14        # 只看最近两周的动态
-      imageLimit: 0         # 0 = 只看图数，不下载
+      detailOptions:
+        imageLimit: 0       # 0 = 只看图数，不下载
     forward:
       tool: true
       quoteFix: true
@@ -89,23 +105,19 @@ plugins:
 
 ### 群聊感知
 
-| 配置项 | 默认 | 对应工具 |
+| 配置项 | 默认 | 说明 |
 | --- | --- | --- |
-| `group.overview` | ✅ | `group_overview` 群名/人数/全员禁言 + 我在本群的身份 |
-| `group.members` / `group.memberLimit` | ✅ / `50` | `group_members` 成员列表（可按昵称/名片/QQ 过滤），单次最多输出行数 |
-| `group.memberDetail` | ✅ | `member_detail` 成员群内详情 |
-| `group.notices` | ✅ | `group_notices` 群公告（概览 + 按需取全文与图） |
-| `group.noticesIncludeNewMember` | ✅ | 是否包含"发给新成员"的公告（需 NapCat ≥ 4.18.38） |
-| `group.noticeImageLimit` | `3` | 公告详情最多取几张图（`0` = 不取） |
-| `group.honors` / `group.essence` / `group.signed` | ✅ | `group_honors` / `group_essence` / `group_signed` |
-| `group.avatar` | ✅ | `group_avatar` 看群头像（需模型支持图片输入） |
-| `group.activity` / `group.activityCount` | ❌ / `200` | `group_activity` 近期发言活跃度（拉历史消息，较重） |
-| `group.files` | ✅ | `group_files` 群文件列表 / 内容读取 |
-| `group.fileListOnly` | ✅ | 只列文件元数据。**这是读取的前提**；关掉后才启用下面的解析 |
-| `group.fileParse` | ❌ | 解析 txt/md/json/csv/docx/pptx/xlsx/图片交给模型（pdf 只给链接） |
-| `group.fileMaxKb` / `group.fileTextLimit` | `8192` / `20000` | 单文件下载上限（KB）/ 单文件输出字数上限 |
-| `group.albums` | ✅ | `group_albums` 群相册与上传批次 |
-| `group.albumImageLimit` / `group.albumCooldownSeconds` / `group.albumBatchLimit` | `3` / `10` / `20` | 单次取图数 / 详情冷却（秒）/ 概览批次数 |
+| `group.tools` | 除 `activity` 外全选 | **复选框**：勾选启用的群聊工具（`overview` / `members` / `memberDetail` / `notices` / `honors` / `essence` / `signed` / `avatar` / `activity` / `files` / `albums`） |
+| `group.memberOptions.limit` | `50` | `group_members` 单次最多输出行数（超出提示用关键词缩小） |
+| `group.noticeOptions.includeNewMember` | ✅ | 是否包含"发给新成员"的公告（需 NapCat ≥ 4.18.38） |
+| `group.noticeOptions.imageLimit` | `3` | 公告详情最多取几张图（`0` = 不取） |
+| `group.activityOptions.count` | `200` | 活跃度统计默认拉取的消息条数 |
+| `group.fileOptions.listOnly` | ✅ | 只列文件元数据。**这是读取的前提**；关掉后才启用解析 |
+| `group.fileOptions.parse` | ❌ | 解析 txt/md/json/csv/docx/pptx/xlsx/图片交给模型（pdf 只给链接） |
+| `group.fileOptions.maxKb` / `group.fileOptions.textLimit` | `8192` / `20000` | 单文件下载上限（KB）/ 单文件输出字数上限 |
+| `group.albumOptions.imageLimit` / `group.albumOptions.cooldownSeconds` / `group.albumOptions.batchLimit` | `3` / `10` / `20` | 单次取图数 / 详情冷却（秒）/ 概览批次数 |
+
+> 带 `Options` 的几项是**折叠子块**，只对相应工具生效；没勾选该工具时，它们的值不影响行为。
 
 ### 聊天上下文
 
@@ -118,12 +130,10 @@ plugins:
 
 ### 用户感知
 
-| 配置项 | 默认 | 对应工具 |
+| 配置项 | 默认 | 说明 |
 | --- | --- | --- |
-| `user.profile` | ✅ | `user_profile` 资料卡（昵称/签名/等级/注册时间/VIP 等） |
-| `user.avatar` | ✅ | `user_avatar` 看头像（需模型支持图片输入） |
-| `user.reactionStats` | ✅ | `profile_reaction_stats` 获赞数据（只读） |
-| `user.friends` / `user.friendLimit` | ✅ / `10` | `friend_overview` / `friend_search`，及搜索一次最多列几个 |
+| `user.tools` | 全选 | **复选框**：`profile`（资料卡）、`avatar`（头像）、`reactionStats`（互动数据）、`friends`（好友概况与搜索） |
+| `user.friendOptions.limit` | `10` | `friend_search` 一次最多列多少个匹配的好友 |
 
 ### QQ 空间感知（只读）
 
@@ -132,12 +142,12 @@ plugins:
 
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
-| `qzone.feeds` / `qzone.posts` / `qzone.detail` / `qzone.profile` | ✅ | 四个工具开关：好友动态 / 说说列表 / 说说详情 / 空间资料 |
-| `qzone.count` / `max` | `8` / `20` | 列表默认条数 / 单次上限（接口上限：动态 50、说说 100） |
-| `qzone.commentCount` | `20` | 详情默认取多少条评论 |
-| `qzone.imageLimit` | `0` | 详情默认取几张图（`0` = 只看图数，不下载；上限 4） |
-| `qzone.cacheTtlSeconds` | `180` | 空间结果缓存秒数，`0` = 每次实查 |
+| `qzone.tools` | 全选 | **复选框**：`feeds`（好友动态）/ `posts`（说说列表）/ `detail`（说说详情）/ `profile`（空间资料） |
+| `qzone.count` / `qzone.max` | `8` / `20` | 列表默认条数 / 单次上限（接口上限：动态 50、说说 100） |
 | `qzone.maxAgeDays` | `14` | **最多看多少天前**的动态/说说（`0` = 不限）。超期条目不再列出，也不再提供翻页入口 |
+| `qzone.cacheTtlSeconds` | `180` | 空间结果缓存秒数，`0` = 每次实查 |
+| `qzone.detailOptions.commentCount` | `20` | 详情默认取多少条评论（折叠块，`detail` 勾选后才有意义） |
+| `qzone.detailOptions.imageLimit` | `0` | 详情默认取几张图（`0` = 只看图数，不下载；上限 4） |
 
 > **编号机制**：列表工具把结果存进「本会话最近一次列表」，`qzone_post_detail` 只认其中的 `index`；
 > 快照 10 分钟过期，过期后模型会被告知"记不得了"，重新看一遍即可。
@@ -247,6 +257,18 @@ plugins:
 
 **改进**
 
+- **配置页重构（旧配置会自动迁移）**：
+  - 群聊 / 用户 / QQ 空间的工具开关从「每个工具一个开关」合并为**复选框列表**
+    （`group.tools` / `user.tools` / `qzone.tools`），一屏看完、勾选即启用；
+  - 每个工具的专属参数收进紧邻的**折叠子块**：`group.memberOptions` / `group.noticeOptions` /
+    `group.activityOptions` / `group.fileOptions` / `group.albumOptions` / `user.friendOptions` /
+    `qzone.detailOptions`。原来的扁平键（如 `group.memberLimit`、`group.fileParse`、
+    `qzone.commentCount`）都搬进了对应子块；
+  - **升级不需要手改配置**：插件启动时会识别旧键并自动换算——
+    旧布尔开关折算进 `tools`（关掉的工具仍保持关闭），旧标量搬进对应子块，随后删掉旧键；
+    迁移时打一条 warn 日志列出识别到的旧键，建议在控制台确认后保存一次，让配置文件只剩新键；
+  - 如果 `tools` 已经不是默认值（说明你已手工迁移过），旧布尔只做清理，不会覆盖你的选择；
+  - 子块默认折叠，展开才显示具体数值，配置页长度明显缩短。
 - **压缩长边可配** `imageMaxSide`（默认 **1280**，此前固定 900）：照片更清晰，公告/群文件的截图小字也更容易辨认。
 - **压缩改为逐级降档**：1280 → 900 → 640，必要时再把 JPEG 质量降到 60。以前只压一档，细节极多的图压完仍超 `imageMaxKb` 就整张放弃（模型只能回"加载不出来"）；现在只要有一档塞得进就交付。
 - **空间详情单次最多看 4 张图**（原 2 张）：压缩后单张通常 100–250KB，2 张的限制已无必要。

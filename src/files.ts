@@ -77,10 +77,10 @@ export const fileToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
 
           // ── 读取单个文件 ──
           if (input.file_id) {
-            if (cfg.fileListOnly) {
+            if ((cfg.fileOptions?.listOnly ?? true)) {
               return '当前网络不好，文件的具体内容暂时没有加载出来呢，我只能看到文件列表（名字、大小、谁传的）。'
             }
-            if (!cfg.fileParse) {
+            if (!(cfg.fileOptions?.parse ?? false)) {
               return '当前网络不好，暂时没有加载出文件具体内容呢，我只能先看到文件名、大小这些信息。'
             }
             const fileId = String(input.file_id).trim()
@@ -99,7 +99,7 @@ export const fileToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
             const url = String(urlRes.data ?? '').trim()
             if (!url) return '这个文件我没能打开（可能已经被删了，或者链接过期了）。'
 
-            const maxBytes = Math.max(64, cfg.fileMaxKb || 8192) * 1024
+            const maxBytes = Math.max(64, cfg.fileOptions?.maxKb ?? 8192) * 1024
             let bytes: Buffer
             try {
               bytes = await downloadBytes(deps.ctx, url, maxBytes)
@@ -150,7 +150,7 @@ export const fileToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
               }
             }
 
-            const textLimit = Math.max(500, Math.min(cfg.fileTextLimit || 20000, MAX_CHARS_HARD))
+            const textLimit = Math.max(500, Math.min(cfg.fileOptions?.textLimit ?? 20000, MAX_CHARS_HARD))
 
             try {
               let text = ''
@@ -251,9 +251,9 @@ export const fileToolDefs: Record<string, (deps: ToolDeps) => ChatLunaTool> = {
             if (files.length > limit) lines.push(`……还有 ${files.length - limit} 个文件没列出来（想看更多就把 limit 调大）`)
           }
 
-          if (cfg.fileListOnly) {
+          if ((cfg.fileOptions?.listOnly ?? true)) {
             lines.push('（文件的具体内容这会儿加载不出来，先看看列表吧）')
-          } else if (!cfg.fileParse) {
+          } else if (!(cfg.fileOptions?.parse ?? false)) {
             lines.push('（文件内容暂时没加载出来，只能先看到文件名、大小这些）')
           } else {
             lines.push('（想翻开某个文件，把它的 file_id 和 file_name 一起带上，我就能看看里面的内容）')

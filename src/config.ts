@@ -10,50 +10,45 @@ import type { AvatarDelivery } from './avatar'
 
 /** 群聊感知各工具开关与参数 */
 export interface GroupSenseConfig {
-  /** group_overview */
-  overview: boolean
-  /** group_members */
-  members: boolean
-  /** group_members 单次输出成员行数上限 */
-  memberLimit: number
-  /** member_detail */
-  memberDetail: boolean
-  /** group_notices */
-  notices: boolean
-  /** group_notices 是否包含"发送给新成员"的公告 */
-  noticesIncludeNewMember: boolean
-  /** group_notices 单条公告最多取回几张图片 */
-  noticeImageLimit: number
-  /** group_honors */
-  honors: boolean
-  /** group_essence */
-  essence: boolean
-  /** group_signed */
-  signed: boolean
-  /** group_avatar */
-  avatar: boolean
-  /** group_activity（较重历史接口，默认关） */
-  activity: boolean
-  /** group_activity 默认拉取消息条数 */
-  activityCount: number
-  /** group_files：群文件列表 / 内容读取 */
-  files: boolean
-  /** 只显示文件列表（不下载内容）；关闭后 fileParse 才有意义 */
-  fileListOnly: boolean
-  /** 尝试解析可获取的文件内容交给模型（txt/md/json/csv/docx/pptx/xlsx/图片；pdf 只给链接） */
-  fileParse: boolean
-  /** 单文件下载上限（KB） */
-  fileMaxKb: number
-  /** 单个文件最多输出多少字 */
-  fileTextLimit: number
-  /** group_albums：群相册列表 / 上传批次详情 */
-  albums: boolean
-  /** 一次最多取回几张相册图片 */
-  albumImageLimit: number
-  /** 相册详情调用的会话冷却（秒） */
-  albumCooldownSeconds: number
-  /** 相册概览一次最多列多少个上传批次 */
-  albumBatchLimit: number
+  /** 勾选启用的工具（复选框，见 GROUP_TOOL_KEYS） */
+  tools: string[]
+  /** group_members 的专属设置 */
+  memberOptions: {
+    /** 单次输出成员行数上限 */
+    limit: number
+  }
+  /** group_notices 的专属设置 */
+  noticeOptions: {
+    /** 是否包含"发送给新成员"的公告 */
+    includeNewMember: boolean
+    /** 单条公告最多取回几张图片 */
+    imageLimit: number
+  }
+  /** group_activity 的专属设置 */
+  activityOptions: {
+    /** 默认拉取消息条数 */
+    count: number
+  }
+  /** group_files 的专属设置 */
+  fileOptions: {
+    /** 只显示文件列表（不下载内容）；关闭后 parse 才有意义 */
+    listOnly: boolean
+    /** 尝试解析文件内容交给模型（txt/md/json/csv/docx/pptx/xlsx/图片；pdf 只给链接） */
+    parse: boolean
+    /** 单文件下载上限（KB） */
+    maxKb: number
+    /** 单个文件最多输出多少字 */
+    textLimit: number
+  }
+  /** group_albums 的专属设置 */
+  albumOptions: {
+    /** 一次最多取回几张相册图片 */
+    imageLimit: number
+    /** 相册详情调用的会话冷却（秒） */
+    cooldownSeconds: number
+    /** 相册概览一次最多列多少个上传批次 */
+    batchLimit: number
+  }
 }
 
 /** 聊天上下文（最近消息，群聊/私聊共用） */
@@ -67,16 +62,13 @@ export interface RecentConfig {
 }
 
 export interface UserSenseConfig {
-  /** user_profile */
-  profile: boolean
-  /** user_avatar */
-  avatar: boolean
-  /** profile_reaction_stats */
-  reactionStats: boolean
-  /** friend_overview / friend_search */
-  friends: boolean
-  /** friend_search 默认最多列多少个好友 */
-  friendLimit: number
+  /** 勾选启用的工具（复选框，见 USER_TOOL_KEYS） */
+  tools: string[]
+  /** friend_search 的专属设置 */
+  friendOptions: {
+    /** 一次最多列多少个匹配的好友 */
+    limit: number
+  }
 }
 
 /** 合并转发（聊天记录）与 chatluna 引用修复 */
@@ -148,22 +140,19 @@ export interface ActionConfig {
 
 /** QQ 空间感知（只读；这些 action 是 NapCat 4.18.42 才新增的） */
 export interface QzoneSenseConfig {
-  /** qzone_feeds：好友动态 */
-  feeds: boolean
-  /** qzone_posts：某人/自己的说说列表 */
-  posts: boolean
-  /** qzone_post_detail：单条说说的全文与评论 */
-  detail: boolean
-  /** qzone_profile：空间名称与说明 */
-  profile: boolean
+  /** 勾选启用的工具（复选框，见 QZONE_TOOL_KEYS） */
+  tools: string[]
   /** 列表默认返回多少条 */
   count: number
   /** 列表单次上限（好友动态受 50 限制、说说列表受 100 限制，插件会再夹一次） */
   max: number
-  /** 详情默认取多少条评论 */
-  commentCount: number
-  /** 详情默认取几张图（0 = 只看图数，不下载） */
-  imageLimit: number
+  /** qzone_post_detail 的专属设置 */
+  detailOptions: {
+    /** 详情默认取多少条评论 */
+    commentCount: number
+    /** 详情默认取几张图（0 = 只看图数，不下载） */
+    imageLimit: number
+  }
   /** 空间查询缓存（秒）。空间走网页接口，TTL 比全局长以降低风控风险 */
   cacheTtlSeconds: number
   /**
@@ -203,6 +192,59 @@ export interface Config {
   /** 主动工具（群打卡 / 资料卡点赞），默认全部关闭 */
   action: ActionConfig
 }
+
+// ─────────────────────────────────────────────
+// 工具复选框的默认勾选值（取值 = 各 schema 里 Schema.const 的内部标识）
+// 说明：工具选择用 `Schema.array(...).role('checkbox')`（对齐 livingmemory 的写法），
+// 每个工具的专属参数放在紧邻的折叠子对象里（xxxOptions）。
+// ─────────────────────────────────────────────
+
+/** 群聊：默认勾选除 group_activity 外的全部（activity 要拉历史消息，较重） */
+export const DEFAULT_GROUP_TOOLS = [
+  'overview', 'members', 'memberDetail', 'notices', 'honors', 'essence', 'signed', 'avatar', 'files', 'albums',
+] as const
+/** 用户：四个只读工具默认全开 */
+export const DEFAULT_USER_TOOLS = ['profile', 'avatar', 'reactionStats', 'friends'] as const
+/** 空间：四个只读工具默认全开 */
+export const DEFAULT_QZONE_TOOLS = ['feeds', 'posts', 'detail', 'profile'] as const
+
+// 复选框字段显式声明为 Schema<string[]>：schema 默认会推成字面量联合类型，与 Config 接口里的 string[] 不兼容。
+const groupToolsSchema = Schema.array(Schema.union([
+  Schema.const('overview').description('group_overview：群名称 / 人数 / 全员禁言 + 我在本群的身份'),
+  Schema.const('members').description('group_members：群成员列表（可按昵称 / 名片 / QQ 过滤）'),
+  Schema.const('memberDetail').description('member_detail：某成员的群内详情（头衔 / 等级 / 入群时间 / 最后发言）'),
+  Schema.const('notices').description('group_notices：群公告（概览 + 按需取完整正文与图片）'),
+  Schema.const('honors').description('group_honors：群荣誉榜（龙王 / 群聊之火 / 快乐源泉等）'),
+  Schema.const('essence').description('group_essence：群精华消息'),
+  Schema.const('signed').description('group_signed：今日打卡（签到）榜'),
+  Schema.const('avatar').description('group_avatar：看群头像（需模型支持图片输入）'),
+  Schema.const('activity').description('group_activity：近期发言活跃度统计（拉历史消息，较重）'),
+  Schema.const('files').description('group_files：群文件列表与（可选）文件内容读取'),
+  Schema.const('albums').description('group_albums：群相册列表与上传批次详情'),
+]))
+  .role('checkbox')
+  .default([...DEFAULT_GROUP_TOOLS])
+  .description('勾选要启用的群聊感知工具') as unknown as Schema<string[]>
+
+const userToolsSchema = Schema.array(Schema.union([
+  Schema.const('profile').description('user_profile：任意 QQ 的资料卡（昵称 / 签名 / 等级 / 注册时间 / VIP 等）'),
+  Schema.const('avatar').description('user_avatar：看某人的 QQ 头像（需模型支持图片输入）'),
+  Schema.const('reactionStats').description('profile_reaction_stats：资料卡的互动数据（总计 / 今日新增 / 最近互动的人）'),
+  Schema.const('friends').description('friend_overview / friend_search：好友总数、分组、单向好友与好友搜索'),
+]))
+  .role('checkbox')
+  .default([...DEFAULT_USER_TOOLS])
+  .description('勾选要启用的用户 / 资料感知工具') as unknown as Schema<string[]>
+
+const qzoneToolsSchema = Schema.array(Schema.union([
+  Schema.const('feeds').description('qzone_feeds：朋友们的空间动态（带序号，可往前翻）'),
+  Schema.const('posts').description('qzone_posts：某人（或自己）的说说列表（带序号，可往后翻）'),
+  Schema.const('detail').description('qzone_post_detail：单条说说的全文与评论（含楼中楼）'),
+  Schema.const('profile').description('qzone_profile：空间名称与说明'),
+]))
+  .role('checkbox')
+  .default([...DEFAULT_QZONE_TOOLS])
+  .description('勾选要启用的 QQ 空间工具（需要 NapCat 4.18.42+）') as unknown as Schema<string[]>
 
 export const Config = Schema.intersect([
   Schema.object({
@@ -256,28 +298,60 @@ export const Config = Schema.intersect([
   // ── 群聊感知 ──
   Schema.object({
     group: Schema.object({
-      overview: Schema.boolean().default(true).description('group_overview：群名称/人数/全员禁言 + 我在本群的名片与身份'),
-      members: Schema.boolean().default(true).description('group_members：群成员列表（可按昵称/名片/QQ 过滤）'),
-      memberLimit: Schema.number().min(10).max(200).default(50).description('成员列表单次最多输出行数（超出提示用关键词缩小）'),
-      memberDetail: Schema.boolean().default(true).description('member_detail：某成员的群内详情（头衔/等级/入群时间/最后发言等）'),
-      notices: Schema.boolean().default(true).description('group_notices：群公告列表（走网页协议，偶发失败会自动提示）'),
-      noticesIncludeNewMember: Schema.boolean().default(true).description('群公告是否包含"发送给新成员"的那类公告（需要较新版本的 NapCat 才能读到）'),
-      noticeImageLimit: Schema.number().min(0).max(6).default(3).description('查看某条公告详情时，最多取回几张公告图片交给模型（0 = 不取图，只说明有几张）'),
-      honors: Schema.boolean().default(true).description('group_honors：群荣誉榜（龙王/群聊之火/快乐源泉等）'),
-      essence: Schema.boolean().default(true).description('group_essence：群精华消息'),
-      signed: Schema.boolean().default(true).description('group_signed：今日打卡（签到）榜'),
-      avatar: Schema.boolean().default(true).description('group_avatar：让模型看见群头像（需主模型支持图片输入）'),
-      activity: Schema.boolean().default(false).description('group_activity：近期发言活跃度统计（拉历史消息，较重，默认关闭）'),
-      activityCount: Schema.number().min(50).max(500).default(200).description('活跃度统计默认拉取的消息条数'),
-      files: Schema.boolean().default(true).description('group_files：群文件列表与（可选）文件内容读取'),
-      fileListOnly: Schema.boolean().default(true).description('只显示文件列表（文件名/大小/上传者/时间），不下载内容。关闭它才会启用下面的「尝试解析文件」'),
-      fileParse: Schema.boolean().default(false).description('尝试解析可获取的文件内容交给模型（txt/md/json/csv/docx/pptx/xlsx/图片；pdf 只给下载链接）。仅在关闭「只显示文件列表」后生效；无论是否开启，都要先看文件列表拿到 file_id 才能读取'),
-      fileMaxKb: Schema.number().min(64).max(51200).default(8192).description('单个群文件允许下载的最大体积（KB），超过只给元数据与下载链接'),
-      fileTextLimit: Schema.number().min(500).max(100000).default(20000).description('单个文件最多交给模型多少字（超出截断并注明）'),
-      albums: Schema.boolean().default(true).description('group_albums：群相册列表与上传批次详情（含图片）'),
-      albumImageLimit: Schema.number().min(0).max(9).default(3).description('查看某次上传详情时，一次最多取回几张图片交给模型（0 = 只看文字说明）'),
-      albumCooldownSeconds: Schema.number().min(0).max(300).default(10).description('相册详情两次调用之间的会话冷却（秒），防止模型连着刷图'),
-      albumBatchLimit: Schema.number().min(1).max(100).default(20).description('相册概览一次最多列多少个上传批次'),
+      tools: groupToolsSchema,
+
+
+      memberOptions: Schema.object({
+        limit: Schema.number().min(10).max(200).default(50)
+          .description('成员列表单次最多输出行数（超出时提示用关键词缩小）'),
+      })
+        .default({} as GroupSenseConfig['memberOptions'])
+        .description('成员列表（group_members）')
+        .collapse(),
+
+      noticeOptions: Schema.object({
+        includeNewMember: Schema.boolean().default(true)
+          .description('是否包含"发送给新成员"的那类公告（需要较新版本的 NapCat 才能读到）'),
+        imageLimit: Schema.number().min(0).max(6).default(3)
+          .description('查看某条公告详情时，最多取回几张公告图片交给模型（0 = 不取图，只说明有几张）'),
+      })
+        .default({} as GroupSenseConfig['noticeOptions'])
+        .description('群公告（group_notices）')
+        .collapse(),
+
+      activityOptions: Schema.object({
+        count: Schema.number().min(50).max(500).default(200)
+          .description('活跃度统计默认拉取的消息条数'),
+      })
+        .default({} as GroupSenseConfig['activityOptions'])
+        .description('活跃度统计（group_activity）')
+        .collapse(),
+
+      fileOptions: Schema.object({
+        listOnly: Schema.boolean().default(true)
+          .description('只显示文件列表（文件名 / 大小 / 上传者 / 时间），不下载内容。关闭它才会启用下面的「尝试解析文件」'),
+        parse: Schema.boolean().default(false)
+          .description('尝试解析可获取的文件内容交给模型（txt/md/json/csv/docx/pptx/xlsx/图片；pdf 只给下载链接）。仅在关闭「只显示文件列表」后生效'),
+        maxKb: Schema.number().min(64).max(51200).default(8192)
+          .description('单个群文件允许下载的最大体积（KB），超过只给元数据与下载链接'),
+        textLimit: Schema.number().min(500).max(100000).default(20000)
+          .description('单个文件最多交给模型多少字（超出截断并注明）'),
+      })
+        .default({} as GroupSenseConfig['fileOptions'])
+        .description('群文件（group_files）')
+        .collapse(),
+
+      albumOptions: Schema.object({
+        imageLimit: Schema.number().min(0).max(9).default(3)
+          .description('查看某次上传详情时，一次最多取回几张图片交给模型（0 = 只看文字说明）'),
+        cooldownSeconds: Schema.number().min(0).max(300).default(10)
+          .description('相册详情两次调用之间的会话冷却（秒），防止模型连着刷图'),
+        batchLimit: Schema.number().min(1).max(100).default(20)
+          .description('相册概览一次最多列多少个上传批次'),
+      })
+        .default({} as GroupSenseConfig['albumOptions'])
+        .description('群相册（group_albums）')
+        .collapse(),
     })
       .default({} as GroupSenseConfig)
       .description('群聊环境感知工具'),
@@ -300,11 +374,15 @@ export const Config = Schema.intersect([
   // ── 用户感知 ──
   Schema.object({
     user: Schema.object({
-      profile: Schema.boolean().default(true).description('user_profile：查询任意 QQ 的资料卡（昵称/签名/等级/注册时间/VIP 等，取决于对方公开程度）'),
-      avatar: Schema.boolean().default(true).description('user_avatar：让模型看见某人的 QQ 头像（需主模型支持图片输入）'),
-      reactionStats: Schema.boolean().default(true).description('profile_reaction_stats：查询自己或他人资料卡的互动数据（总计/今日新增/最近互动的人）'),
-      friends: Schema.boolean().default(true).description('friend_overview / friend_search：好友总数、分组、单向好友，以及判断某人是不是好友（只读，不含任何写操作）'),
-      friendLimit: Schema.number().min(1).max(100).default(10).description('friend_search 一次最多列多少个匹配的好友'),
+      tools: userToolsSchema,
+
+      friendOptions: Schema.object({
+        limit: Schema.number().min(1).max(100).default(10)
+          .description('friend_search 一次最多列多少个匹配的好友'),
+      })
+        .default({} as UserSenseConfig['friendOptions'])
+        .description('好友搜索（friend_search）')
+        .collapse(),
     })
       .default({} as UserSenseConfig)
       .description('用户/个人资料感知工具'),
@@ -315,26 +393,26 @@ export const Config = Schema.intersect([
   // 走的都是空间网页接口：只读、不落库、缓存 TTL 比全局长。
   Schema.object({
     qzone: Schema.object({
-      feeds: Schema.boolean().default(true)
-        .description('qzone_feeds：看朋友们最近的空间动态（只读，带序号，可往前翻）'),
-      posts: Schema.boolean().default(true)
-        .description('qzone_posts：看某人（或自己）发过的说说列表（只读，带序号）'),
-      detail: Schema.boolean().default(true)
-        .description('qzone_post_detail：打开某条说说的全文与评论（只读）'),
-      profile: Schema.boolean().default(true)
-        .description('qzone_profile：看某个空间的名字与说明（只读）'),
+      tools: qzoneToolsSchema,
+
       count: Schema.number().min(1).max(50).default(8)
         .description('列表工具默认返回多少条'),
       max: Schema.number().min(1).max(100).default(20)
         .description('列表工具单次最多返回多少条（好友动态实际最多 50、说说列表最多 100，插件会再夹一次）'),
-      commentCount: Schema.number().min(1).max(50).default(20)
-        .description('打开说说详情时默认取多少条评论'),
-      imageLimit: Schema.number().min(0).max(4).default(0)
-        .description('打开说说详情时默认取几张图（0 = 只看图数、不下载；非 0 需要主模型支持图片输入）'),
-      cacheTtlSeconds: Schema.number().min(0).max(3600).default(180)
-        .description('空间查询结果的缓存时间（秒）。空间走网页接口，缓存长一点能明显减少被风控的机会；0 = 每次都实查'),
       maxAgeDays: Schema.number().min(0).max(3650).default(14)
         .description('最多看多少天前的空间动态/说说（默认 14 天，0 = 不限制）。好友动态和说说列表都按时间倒序，超过这个天数的条目不再列出，也不再继续往后翻页'),
+      cacheTtlSeconds: Schema.number().min(0).max(3600).default(180)
+        .description('空间查询结果的缓存时间（秒）。空间走网页接口，缓存长一点能明显减少被风控的机会；0 = 每次都实查'),
+
+      detailOptions: Schema.object({
+        commentCount: Schema.number().min(1).max(50).default(20)
+          .description('打开说说详情时默认取多少条评论'),
+        imageLimit: Schema.number().min(0).max(4).default(0)
+          .description('打开说说详情时默认取几张图（0 = 只看图数、不下载；非 0 需要主模型支持图片输入）'),
+      })
+        .default({} as QzoneSenseConfig['detailOptions'])
+        .description('说说详情（qzone_post_detail）')
+        .collapse(),
     })
       .default({} as QzoneSenseConfig)
       .description('QQ 空间感知工具（需要 NapCat 4.18.42 及以上）'),
